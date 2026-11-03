@@ -15,6 +15,36 @@ LOCK = ROOT / "requirements.lock"
 EXACT_PIN = re.compile(r"(?P<name>[A-Za-z0-9][A-Za-z0-9._-]*)==(?P<version>[A-Za-z0-9._+!-]+)")
 SHA256_OPTION = re.compile(r"--hash=sha256:[0-9a-f]{64}")
 
+# The reviewed dependency set (docs/decisions.md AM-9, AM-14). Changing it is a deliberate edit of this test.
+APPROVED_RUNTIME_PINS = {"cryptography": "50.0.2", "fastapi": "0.141.1", "pyjwt": "2.15.1"}
+APPROVED_DEV_PINS = {"httpx2": "2.13.1", "pytest": "9.1.1"}
+TRANSITIVE_ONLY = {"cffi", "pycparser"}  # locked, never declared directly
+APPROVED_LOCK = {
+    "annotated-doc": "0.0.4",
+    "annotated-types": "0.7.0",
+    "anyio": "4.14.2",
+    "cffi": "2.1.1",
+    "cryptography": "50.0.2",
+    "fastapi": "0.141.1",
+    "h11": "0.16.0",
+    "httpcore2": "2.13.1",
+    "httpx2": "2.13.1",
+    "idna": "3.18",
+    "iniconfig": "2.3.1",
+    "packaging": "26.3",
+    "pluggy": "1.7.0",
+    "pycparser": "3.0",
+    "pydantic": "2.13.4",
+    "pydantic-core": "2.46.4",
+    "pygments": "2.21.0",
+    "pyjwt": "2.15.1",
+    "pytest": "9.1.1",
+    "starlette": "1.3.1",
+    "truststore": "0.10.5",
+    "typing-extensions": "4.16.0",
+    "typing-inspection": "0.4.2",
+}
+
 
 def _pyproject() -> dict:
     with (ROOT / "pyproject.toml").open("rb") as f:
@@ -147,6 +177,41 @@ def test_direct_pins_match_the_lock():
         if in_lock != match["version"]:
             problems.append(f"{match['name']}: pyproject pins {match['version']}, lock has {in_lock}")
     assert not problems, "; ".join(problems)
+
+
+def test_direct_dependencies_are_exactly_the_approved_pins():
+    project = _pyproject()["project"]
+
+    def pins(requirements):
+        matches = [EXACT_PIN.fullmatch(requirement) for requirement in requirements]
+        assert all(matches), f"not exact '==' pins without extras: {requirements}"
+        found = {_canonical(match["name"]): match["version"] for match in matches}
+        assert len(found) == len(matches), f"a distribution is declared twice: {requirements}"
+        return found
+
+    assert pins(project["dependencies"]) == APPROVED_RUNTIME_PINS
+    assert set(project["optional-dependencies"]) == {"dev"}
+    assert pins(project["optional-dependencies"]["dev"]) == APPROVED_DEV_PINS
+
+
+def test_the_lock_is_exactly_the_reviewed_set_of_23_distributions():
+    assert _locked_versions() == APPROVED_LOCK
+    assert len(APPROVED_LOCK) == 23
+
+
+def test_transitive_distributions_are_locked_but_not_declared_directly():
+    requirements = _runtime_and_dev_requirements(_pyproject())
+    declared = {_canonical(EXACT_PIN.fullmatch(requirement)["name"]) for requirement in requirements}
+    assert TRANSITIVE_ONLY <= set(_locked_versions())
+    assert not TRANSITIVE_ONLY & declared
+
+
+def test_pinned_cryptography_stack_imports_and_enables_es256():
+    """Import-level compatibility only: PyJWT found cryptography and offers ES256. No key is created or used here."""
+    from jwt import algorithms
+
+    assert algorithms.has_crypto
+    assert "ES256" in algorithms.get_default_algorithms()
 
 
 def test_locked_dependencies_are_installed_at_locked_versions():

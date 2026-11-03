@@ -5,7 +5,8 @@
 # but its artifact is not covered by these hashes (pip does not hash-check build requirements).
 # Install: python -m pip install --require-hashes --only-binary=:all: -r requirements.lock
 #          python -m pip install --no-deps -e .
-# Generated 2026-11-03 from `pip install --dry-run --report` (pip 25.2). See docs/decisions.md AM-9.
+# Generated 2026-11-03 from `pip install --dry-run --report` (pip 25.2). cffi, cryptography, pycparser and
+# PyJWT were added the same day for M1E-0; the other 19 entries are unchanged. See docs/decisions.md AM-9, AM-14.
 # runtime
 annotated-doc==0.0.4 \
     --hash=sha256:571ac1dc6991c450b25a9c2d84a3705e2ae7a53467b5d111c24fa8baabbed320
@@ -15,6 +16,12 @@ annotated-types==0.7.0 \
 # runtime
 anyio==4.14.2 \
     --hash=sha256:9f505dda5ac9f0c8309b5e8bd445a8c2bf7246f3ce950121e45ea15bc41d1494
+# runtime
+cffi==2.1.1 \
+    --hash=sha256:19ee6127ee34de7d83ce3d371ebc5ed91addbdcc39f9ab15ce4eb35a4e534971
+# runtime
+cryptography==50.0.2 \
+    --hash=sha256:fa8f5efb344d6908a1ce62f4a24e2e5780f825d6f53f5f50ec5ffacac72936cb
 # runtime
 fastapi==0.141.1 \
     --hash=sha256:bfb91aa2d334c61cb35ba9a116fc123b3d3df31640b801cf57a7a78ec3f603b3
@@ -40,6 +47,9 @@ packaging==26.3 \
 pluggy==1.7.0 \
     --hash=sha256:7dd7b0d8832ba3cb632c306926ded123429211b83641b35dc5c41ad2d34f9bec
 # runtime
+pycparser==3.0 \
+    --hash=sha256:b727414169a36b7d524c1c3e31839a521725078d7b2ff038656844266160a992
+# runtime
 pydantic==2.13.4 \
     --hash=sha256:45a282cde31d808236fd7ea9d919b128653c8b38b393d1c4ab335c62924d9aba
 # runtime
@@ -48,6 +58,9 @@ pydantic_core==2.46.4 \
 # dev/test only
 Pygments==2.21.0 \
     --hash=sha256:2363c69b61c4a97c838da3b130dcd6468f4848992b21a82f2a63ec34377137d9
+# runtime
+PyJWT==2.15.1 \
+    --hash=sha256:42d59d631f7768a1028a64c7ff581a9bf7519804daf91fc5b6c56e30eec5e193
 # dev/test only
 pytest==9.1.1 \
     --hash=sha256:37a86b45efb9a47a61a36449063e8e18d0cab3161329fc099eb21783169c4f0c

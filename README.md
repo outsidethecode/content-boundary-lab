@@ -16,7 +16,9 @@ python3 -m venv .venv
 .venv/bin/python -m pytest -q
 ```
 
-`requirements.lock` pins every dependency by SHA-256 hash, but only for CPython 3.13 on macOS arm64. Other platforms and Python 3.12 are refused by the hash check until each has its own verified lock. `pyproject.toml` declares Python 3.12 or newer; no wider claim is made.
+`requirements.lock` pins all 23 distributions, direct and transitive, by SHA-256 hash with one wheel file each, and the install command above accepts wheels only. It was last verified on 2026-11-03 for one environment: CPython 3.13.7 on macOS arm64. `cryptography`, `cffi` and `pydantic_core` ship compiled code, so those three wheels are specific to that platform. Other platforms and Python 3.12 are refused by the hash check until each has its own verified lock. `pyproject.toml` declares Python 3.12 or newer; no wider claim is made.
+
+The direct runtime dependencies are `fastapi`, `PyJWT` and `cryptography`; `cffi` and `pycparser` are installed only because `cryptography` needs them. `PyJWT` and `cryptography` are installed in preparation for local token verification, which is not implemented yet. Nothing in the application uses them, and this README makes no authentication claim.
 
 The build backend (`setuptools==84.2.1`) is version-pinned in `pyproject.toml` and installed by pip into a temporary build environment. It is not covered by the hashes.
 

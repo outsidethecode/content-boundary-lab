@@ -1,6 +1,6 @@
 # Content Boundary Lab: design decisions
 
-**Status:** M0 accepted on 2026-11-03, and the design handover approved the same day. M1A (project scaffold), M1B-1 (dependency foundation, AM-9), M1B-2 (application factory), M1C (source isolation guards), M1D-1 (clock, AM-11), M1D-2 (store) and M1D-3a (transactional audit API, AM-12) are implemented and committed, and M1D-3b (connection hardening, AM-13) is implemented. Nothing from M1E onwards has started: no security findings and no application business logic exist yet. This file is the entry point for implementation sessions.
+**Status:** M0 accepted on 2026-11-03, and the design handover approved the same day. M1A (project scaffold), M1B-1 (dependency foundation, AM-9), M1B-2 (application factory), M1C (source isolation guards), M1D-1 (clock, AM-11), M1D-2 (store), M1D-3a (transactional audit API, AM-12) and M1D-3b (connection hardening, AM-13) are implemented and committed, so M1D is complete, and M1E-0 (dependency foundation, AM-14) is implemented. Nothing from M1E-1 onwards has started: no authentication code, no security findings and no application business logic exist yet. This file is the entry point for implementation sessions.
 
 **Precedence:** the amendments in §3, then the [M0 Addendum](milestones/M0-ADDENDUM.md), then the [M0 proposal](milestones/M0.md). The two milestone files are preserved records and are not edited. Any later change is added here as a new amendment.
 
@@ -133,6 +133,39 @@ Every other decision is unchanged. The read-only assertion `app.dependency_overr
   - The authorizer does not see work SQLite does implicitly (the delete inside `INSERT OR REPLACE`, upkeep of `sqlite_sequence`, foreign-key actions), so the triggers remain necessary.
   - Complete audit coverage of every mutation must be verified separately in each workflow (M1F onwards).
 
+**AM-14: M1E architecture and the M1E-0 dependency foundation (2026-11-03).** Approved by the security reviewer. M1E is split into M1E-0 (dependencies), M1E-1 (trusted configuration) and M1E-2 (the verifier and its tests). Only M1E-0 is implemented. The first group below records decisions about code that does not exist yet; no authentication control is implemented or claimed.
+
+*Approved design (M1E-1 and M1E-2, not implemented):*
+- **Algorithm and profile:** ES256 only (ECDSA P-256 with SHA-256). A restricted educational access-token profile: the JWS header may hold only `alg` (exactly `ES256`), `typ` (exactly `at+jwt`) and `kid`. Key URLs (`jku`, `x5u`), embedded keys (`jwk`, `x5c`), `crit` and every other header member are rejected. The profile borrows the `at+jwt` type from RFC 9068 and does not claim full RFC 9068 conformance.
+- **Trusted keys** (amends the single-key wording in §4 and Addendum §5.5): a locally configured JWKS of one to eight public P-256 keys, so that keys can overlap during rotation. Each key needs a unique, bounded `kid`. The loader checks the key type and curve, checks that the point is valid, and rejects private key material and invalid, duplicate or conflicting metadata. The app refuses to start when the set is missing, unreadable, empty or invalid. Keys are never fetched, `PyJWKClient` is not used, the token header never chooses a key source, and a missing or unknown `kid` is rejected rather than trying every key.
+- **Claims:** `iss` must equal the configured issuer string exactly. `aud` must be one string equal to the configured audience; a list is rejected. `sub`, `iss`, `aud`, `exp`, `iat` and `nbf` are required, and `sub` must pass the `Actor` shape rules.
+- **Time:** zero clock skew (a lab assumption). The verifier reads the injected clock once per authentication attempt. `exp`, `iat` and `nbf` must be JSON integers, never booleans, within reasonable bounds. `now >= exp` means expired. `nbf` and `iat` may not be in the future, `exp > iat`, `nbf < exp`, and `exp - iat <= 600` seconds (A10, a lab assumption). Whole seconds are compared with the clock's microseconds by integer arithmetic. PyJWT's own time checks may be switched off only once these checks exist and are tested; signature verification is never switched off.
+- **Identity versus permissions:** a successful verification yields only the verified issuer and subject. Role, production and scope claims are never used to authorise anything. The verifier stays independent of HTTP routes until M1F, which wires it to FastAPI and adds the authentication-denial audit vocabulary. An in-process sentinel or source guard can discourage accidental construction of a verified identity; it is not a security boundary against malicious Python code.
+
+*Dependency foundation (M1E-0, implemented):*
+- **Pins:** `PyJWT==2.15.1` and `cryptography==50.0.2` are the new direct runtime pins in `pyproject.toml` (neither with an extra). `cffi==2.1.1` and `pycparser==3.0` are transitive and appear only in the lock. `requirements.lock` now holds 23 distributions (this replaces the count in AM-9); the other 19 entries are unchanged and no conflict with them arose.
+- **Why these versions:** each is the newest release on 2026-11-03 except `pycparser`. 3.0 (2026-01-21) was chosen over 3.12 because 3.1, 3.11 and 3.12 were released within two weeks in October 2026; `cffi` 2.1.1 was released after 3.0 and sets no lower bound.
+- **Selected wheels** (SHA-256 of the files as downloaded, equal to the hashes pip reads from the index):
+  - `pyjwt-2.15.1-py3-none-any.whl`, 33,860 bytes, `42d59d631f7768a1028a64c7ff581a9bf7519804daf91fc5b6c56e30eec5e193`
+  - `cryptography-50.0.2-cp311-abi3-macosx_11_0_arm64.whl`, 3,914,904 bytes, `fa8f5efb344d6908a1ce62f4a24e2e5780f825d6f53f5f50ec5ffacac72936cb`
+  - `cffi-2.1.1-cp313-cp313-macosx_11_0_arm64.whl`, 184,764 bytes, `19ee6127ee34de7d83ce3d371ebc5ed91addbdcc39f9ab15ce4eb35a4e534971`
+  - `pycparser-3.0-py3-none-any.whl`, 48,172 bytes, `b727414169a36b7d524c1c3e31839a521725078d7b2ff038656844266160a992`
+- **How the lock was made:** `pip install --dry-run --report` with the 19 existing pins as constraints resolved exactly 23 wheels, and every one of the 19 existing hashes came out identical. The four new files were then downloaded and hashed independently.
+- **Lock scope:** CPython 3.13 on macOS arm64 only. `pydantic_core`, `cffi` and `cryptography` are the platform-specific wheels; the lock holds one file for each (`cffi` has 99 files and `cryptography` 58 on PyPI for these versions). Dry-runs for CPython 3.12 on macOS arm64 and CPython 3.13 on Linux x86_64 were refused on a hash mismatch, re-run on 2026-11-03 against the 23-entry lock. Other platforms need their own lock, generated and verified there.
+- **Advisories, 2026-11-03:** OSV and PyPI's own `vulnerabilities` field list none for the four exact versions. Limits: this is a lookup, not a scan; the databases lag; and OSV's PyPI records may not cover the OpenSSL that the `cryptography` wheels bundle. History: OSV holds 24 GHSA advisories for PyJWT, 21 of them fixed in 2.12.0 to 2.15.0 (one, whose affected range is 2.11.0 to 2.13.0, ends before 2.15.1), and 42 records for `cryptography`. Most PyJWT advisories concern `PyJWKClient`, `PyJWK`, HMAC keys and PEM detection, which M1E-2 does not call. Repeat the lookup before M1E-2 is committed.
+- **Runtime compatibility, verified in a fresh venv on CPython 3.13.7, macOS arm64:**
+  - The locked wheels installed with `--require-hashes --only-binary=:all:`, then `pip install --no-deps -e .`. `pip check` was clean, and the environment held the 23 locked distributions plus `pip` and the editable project, nothing else. Every artifact was a `.whl` from `files.pythonhosted.org`.
+  - A one-digit change to a hash, a lock without `cffi`, and a lock without `pycparser` were each refused by pip with nothing installed. Removing `pycparser` from an otherwise complete environment failed `pip check` and both environment tests.
+  - An ephemeral in-memory P-256 key signed a synthetic ES256 token. It verified with only the public key and an `["ES256"]` allow-list. A changed payload, a flipped or truncated signature, a different public key, an `ES384`-only allow-list and an unsigned token were each rejected. No key was written to disk.
+- **V2 findings for PyJWT 2.15.1** (source read at the 2.15.1 tag, and each behaviour run in that venv):
+  - `decode` requires an `algorithms` argument and has no clock parameter: its time checks use the real clock, so M1E-2 does its own with the injected clock.
+  - With its own checks on, PyJWT accepts `exp`, `iat` and `nbf` given as numeric strings or floats, because it applies `int()`, and reads `true` as 1. M1E-2 therefore checks their JSON types itself.
+  - `require` treats an absent or `null` claim as missing. `iss` is compared by exact string equality. `strict_aud` rejects a list-valued `aud`; without it a list that contains the audience is accepted.
+  - An unknown `crit` extension and a non-string `kid` are rejected. A `jku` header is ignored, not rejected, so M1E-2 must reject unexpected header members itself.
+  - ES256 verification accepts a private key object as the key. The key loader must therefore reject private material, and only public key objects are passed to PyJWT.
+  - Reusing an options dictionary across calls did not weaken a later verification in 2.15.1 (the CVE-2026-103001 pattern, which affects 2.11.0 to 2.13.0). M1E-2 still builds a fresh dictionary for every call.
+- **Unchanged:** the build-backend limitation recorded in AM-9 (the `setuptools` artifact is not hash-verified), the single-platform scope, and the exclusion of `fastapi[standard]` and every other package.
+
 ## 4. Technical constraints
 
 Details are in the addendum sections cited. Where this summary and the addendum differ, the addendum wins.
@@ -143,10 +176,10 @@ Details are in the addendum sections cited. Where this summary and the addendum 
 - uvicorn is added only at M1M.
 - Not used: python-multipart, any ORM, Docker, or a frontend.
 
-**Identity** (Addendum §5.1, §5.5)
+**Identity** (Addendum §5.1, §5.5; this is the design, implemented from M1E-1, with details in AM-14)
 - ES256 tokens are verified locally: signature, pinned algorithm, `iss`, `aud`, `exp` and `nbf`.
 - Tokens carry identity only. Role or `productions` claims are ignored.
-- The public verification key comes from a settings file path. The app refuses to start if the key is missing, unreadable, or private key material.
+- The public verification keys (one to eight, AM-14) come from a settings file path. The app refuses to start if the key set is missing, unreadable, empty, or contains private key material.
 - No private key is ever committed. `src/` cannot mint tokens.
 - Test issuers live in `tests/support/`. The dev issuer is in `tools/` and writes to the git-ignored `.dev/`.
 
@@ -196,7 +229,7 @@ Details are in the addendum sections cited. Where this summary and the addendum 
 | ID | Item | Needed by |
 |---|---|---|
 | V1 | Starlette raw-body streaming and in-stream size enforcement | M1H |
-| V2 | PyJWT's current release and required-claims behaviour | M1E |
+| V2 | PyJWT's current release and required-claims behaviour: **verified at M1E-0** for 2.15.1 (AM-14); the tests of our own checks come in M1E-2 | M1E |
 | V3 | Cloud-provider specifics: who can write verdict tags, pre-signed URL revocation, object versioning | Before any cloud-mapping docs |
 | V4 | MovieLabs CSAP Parts 4–5 (only Part 1 was read) | Before citing them |
 | V5 | The OWASP Top 10:2025 A06 CWE list | F-04 write-up |
