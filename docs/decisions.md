@@ -1,6 +1,6 @@
 # Content Boundary Lab: design decisions
 
-**Status:** M0 accepted on 2026-11-03, and the design handover approved the same day. M1A (project scaffold) is implemented and committed, and M1B-1 (dependency foundation, AM-9) is implemented. Nothing from M1B-2 onwards has started: no security findings and no application business logic exist yet. This file is the entry point for implementation sessions.
+**Status:** M0 accepted on 2026-11-03, and the design handover approved the same day. M1A (project scaffold) and M1B-1 (dependency foundation, AM-9) are implemented and committed, and M1B-2 (application factory) is implemented. Nothing from M1C onwards has started: no security findings and no application business logic exist yet. This file is the entry point for implementation sessions.
 
 **Precedence:** the amendments in §3, then the [M0 Addendum](milestones/M0-ADDENDUM.md), then the [M0 proposal](milestones/M0.md). The two milestone files are preserved records and are not edited. Any later change is added here as a new amendment.
 
@@ -25,7 +25,7 @@
 | D6 | `requires-python >=3.12`. Claims cover only the versions actually run (3.13.7 locally). | Addendum §2 |
 | D7 | Severity is qualitative ("in-scenario, educational severity"). F-04's severity is conditional. | Addendum §2 |
 | A2 | M0 and the addendum are preserved under `docs/milestones/`. This handover did that. | Addendum §8 |
-| A3 | Explicit application-factory dependency injection (a frozen `Dependencies` dataclass). `dependency_overrides` appears nowhere in `src/`, `labs/` or `tests/`. | Addendum §5.5 |
+| A3 | Explicit application-factory dependency injection (a frozen `Dependencies` dataclass). `dependency_overrides` is not used to substitute components; tests may read it (AM-10). | Addendum §5.5; AM-10 |
 | A4 | Vocabulary: `SCAN_PASSED` and `no_detection`. Never "clean" or "safe". | Addendum §5.3 |
 | A5 | Plan: M1A–M1M, then M2A (isolation proof), then M2B–M2E (one slice per core finding). M3 is absorbed into those slices; M4 is review; M5 is publication readiness. | Addendum §6 |
 | A6 | M1A may touch 5 small files. | Addendum §7 |
@@ -94,6 +94,12 @@ It will be reviewed when F-03 is reached. See open item O-1 for why that point i
 - **Compatibility not covered by upstream CI:** `httpx2` 2.13.1, `anyio` 4.14.2 and `truststore` 0.10.5 (FastAPI's CI used 2.5.0, 4.12.1 and 0.10.4). M1B-1 verification includes a `TestClient` smoke test: an in-process request returns 200 through `httpx2` with no deprecation warning.
 - **Lock changes** need owner approval of the exact pins, a preference for releases at least 14 days old, an advisory re-check and regenerated hashes (from `pip install --dry-run --report`).
 
+**AM-10: `dependency_overrides` clarification (2026-11-03).** Approved by the security reviewer. It clarifies A3 and Addendum §5.5, which said the name appears nowhere in `src/`, `labs/` or `tests/`, and it takes precedence over that wording:
+
+> The reference application and lab implementations must not use FastAPI's `dependency_overrides` mechanism to substitute security-critical components. Tests may inspect the attribute to verify that no overrides are configured. Dependency substitution must use explicit application-factory injection.
+
+Every other decision is unchanged. The read-only assertion `app.dependency_overrides == {}` in `tests/test_app.py` is therefore correct and stays.
+
 ## 4. Technical constraints
 
 Details are in the addendum sections cited. Where this summary and the addendum differ, the addendum wins.
@@ -159,7 +165,7 @@ Details are in the addendum sections cited. Where this summary and the addendum 
 | V3 | Cloud-provider specifics: who can write verdict tags, pre-signed URL revocation, object versioning | Before any cloud-mapping docs |
 | V4 | MovieLabs CSAP Parts 4–5 (only Part 1 was read) | Before citing them |
 | V5 | The OWASP Top 10:2025 A06 CWE list | F-04 write-up |
-| V6 | FastAPI behaviour relied on by A3, plus M0's other from-memory points: RFC 8725, RFC 2606, Python path-join semantics | M1B, or before citing |
+| V6 | FastAPI behaviour relied on by A3: **verified at M1B-2** against fastapi 0.141.1 and starlette 1.3.1 by `tests/test_app.py`. With `docs_url`, `redoc_url` and `openapi_url` all `None`, the app has no routes, and `/`, `/docs`, `/docs/oauth2-redirect`, `/redoc` and `/openapi.json` return 404; `app.openapi()` still builds in-process with no paths. `app.dependency_overrides` is a plain mutable dict (empty by default), so only a source guard can enforce its ban. AM-10 allows tests to inspect it read-only, as `tests/test_app.py` does; the source guard that enforces the ban is M1C's. **Still open:** M0's other from-memory points: RFC 8725, RFC 2606, Python path-join semantics | FastAPI part done (M1B-2); the rest before citing |
 | V7 | Whether the TPN vendor-assessment programme is relevant (not reviewed) | Optional |
 | V8 | No-clobber link, `fsync` and macOS semantics | M1K |
 | V9 | CWE/ASVS mapping recheck, including CWE-354 | Each finding slice |
