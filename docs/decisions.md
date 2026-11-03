@@ -1,6 +1,6 @@
 # Content Boundary Lab: design decisions
 
-**Status:** M0 accepted on 2026-11-03, and the design handover approved the same day. M1A (project scaffold), M1B-1 (dependency foundation, AM-9) and M1B-2 (application factory) are implemented and committed, and M1C (source isolation guards) is implemented. Nothing from M1D onwards has started: no security findings and no application business logic exist yet. This file is the entry point for implementation sessions.
+**Status:** M0 accepted on 2026-11-03, and the design handover approved the same day. M1A (project scaffold), M1B-1 (dependency foundation, AM-9), M1B-2 (application factory) and M1C (source isolation guards) are implemented and committed, and M1D-1 (clock, AM-11) is implemented. Nothing from M1D-2 onwards has started: no security findings and no application business logic exist yet. This file is the entry point for implementation sessions.
 
 **Precedence:** the amendments in §3, then the [M0 Addendum](milestones/M0-ADDENDUM.md), then the [M0 proposal](milestones/M0.md). The two milestone files are preserved records and are not edited. Any later change is added here as a new amendment.
 
@@ -99,6 +99,15 @@ It will be reviewed when F-03 is reached. See open item O-1 for why that point i
 > The reference application and lab implementations must not use FastAPI's `dependency_overrides` mechanism to substitute security-critical components. Tests may inspect the attribute to verify that no overrides are configured. Dependency substitution must use explicit application-factory injection.
 
 Every other decision is unchanged. The read-only assertion `app.dependency_overrides == {}` in `tests/test_app.py` is therefore correct and stays.
+
+**AM-11: M1D decisions (2026-11-03).** Approved by the security reviewer. M1D is split into M1D-1 (clock), M1D-2 (store) and M1D-3 (audit).
+- **Storage:** SQLite `STRICT` tables, so SQLite 3.37 or newer is required; schema compatibility is recorded with `PRAGMA user_version`. Timestamps are `INTEGER` microseconds since the Unix epoch, UTC.
+- **Identifiers:** opaque server-generated UUIDs for productions, engagements and assets; integer ids for subjects.
+- **Model:** coordinators and vendors share the `subjects` and `engagements` structures. For this MVP there is one engagement row per `(subject_id, production_id)`; renewal and historical re-engagement are out of scope. There is no `starts_at`. The 90-day cap (A10, a lab assumption) is enforced in M1F, not in the schema.
+- **Revocation (M1D-2):** one-way, enforced by a trigger.
+- **Audit (M1D-3):** actions are validated against an application-level closed vocabulary. Triggers reject `UPDATE`, `DELETE` and an overwriting insert (a `BEFORE INSERT` collision guard, because `INSERT OR REPLACE` bypasses delete triggers; verified on SQLite 3.50.4), and an authorizer on application connections denies changes to the audit objects. Schema initialisation uses a separate connection so these restrictions do not block schema creation. The table is not tamper-evident (M0).
+- **Connections:** explicit transactions, and a connection per request once routes exist. `Dependencies` stays unchanged throughout M1D.
+- **Clock (M1D-1):** `clock.py` provides the `Clock` protocol, `SystemClock` (UTC) and `to_micros`/`from_micros`, which use integer arithmetic only and reject naive datetimes. Tests use a manual clock. The check that only `clock.py` reads system time is deferred to M1F.
 
 ## 4. Technical constraints
 
