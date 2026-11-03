@@ -1,6 +1,6 @@
 # Content Boundary Lab: design decisions
 
-**Status:** M0 accepted on 2026-11-03, and the design handover approved the same day. Implementation has not started. This file is the entry point for implementation sessions.
+**Status:** M0 accepted on 2026-11-03, and the design handover approved the same day. M1A (project scaffold) is implemented and committed, and M1B-1 (dependency foundation, AM-9) is implemented. Nothing from M1B-2 onwards has started: no security findings and no application business logic exist yet. This file is the entry point for implementation sessions.
 
 **Precedence:** the amendments in §3, then the [M0 Addendum](milestones/M0-ADDENDUM.md), then the [M0 proposal](milestones/M0.md). The two milestone files are preserved records and are not edited. Any later change is added here as a new amendment.
 
@@ -82,13 +82,25 @@ It will be reviewed when F-03 is reached. See open item O-1 for why that point i
 
 **AM-8: F-03 timing (2026-11-03; O-1).** O-1 remains open. It must be resolved before M1I starts.
 
+**AM-9: M1B-1 dependency foundation (2026-11-03).** Approved by the security reviewer.
+- **Stack amendment:** `httpx2` replaces `httpx` as the development/test client. Starlette 1.3.1's `TestClient` prefers `httpx2` and warns that plain `httpx` is deprecated.
+- **Direct pins**, declared in `pyproject.toml`: `fastapi==0.141.1` (runtime); `httpx2==2.13.1` and `pytest==9.1.1` (`dev` extra); `setuptools==84.2.1` (`[build-system]` only).
+- **`requirements.lock`** is the complete install set: 19 distributions, each an exact `==` pin with a SHA-256 hash. It includes `starlette==1.3.1` and `anyio==4.14.2` (4.12.1 has PyPI-reported advisories GHSA-82r6-8w77-94w6 and GHSA-5p39-cfhj-2xmp, fixed in 4.14.2). PyPI's vulnerability data for all 19 pins showed no advisories on 2026-11-03; no scanner was run.
+- **Not installed:** `fastapi[standard]`, `uvicorn` (M1M), `python-multipart`, OpenTelemetry packages, any frontend.
+- **Install:** `python -m pip install --require-hashes --only-binary=:all: -r requirements.lock`, then `python -m pip install --no-deps -e .`.
+- **Lock scope:** CPython 3.13 on macOS arm64 only. `pydantic_core` is the one platform-specific wheel (the lock holds 1 of its 120 files). Dry-runs for CPython 3.12 on macOS arm64 and CPython 3.13 on Linux x86_64 were refused on a hash mismatch. Linux, Python 3.12 and Intel macOS are not claimed; each needs its own lock, generated and verified on that target.
+- **Build backend:** `setuptools==84.2.1` is exact-pinned, but pip 25.2 passes no hash option to the isolated build-environment install, so its artifact is not hash-verified. Accepted residual gap.
+- **Normal validation vs clean-environment reproducibility:** ordinary pytest runs check the lock's format (exact pins, SHA-256 hashes), that the `pyproject.toml` direct pins equal the lock, and that every locked package is installed at the locked version. They tolerate extra packages. `pytest -m clean_env`, run in a fresh venv built from the lock, asserts the installed set is exactly the lock plus `pip` plus the local editable project, with the build backend absent.
+- **Compatibility not covered by upstream CI:** `httpx2` 2.13.1, `anyio` 4.14.2 and `truststore` 0.10.5 (FastAPI's CI used 2.5.0, 4.12.1 and 0.10.4). M1B-1 verification includes a `TestClient` smoke test: an in-process request returns 200 through `httpx2` with no deprecation warning.
+- **Lock changes** need owner approval of the exact pins, a preference for releases at least 14 days old, an advisory re-check and regenerated hashes (from `pip install --dry-run --report`).
+
 ## 4. Technical constraints
 
 Details are in the addendum sections cited. Where this summary and the addendum differ, the addendum wins.
 
 **Environment**
 - Local only: no AWS or other cloud accounts, paid services, externally hosted identity providers or AI APIs.
-- Stack: Python, FastAPI, PyJWT with cryptography, stdlib `sqlite3`/`hashlib`/`pathlib`, pytest with httpx, and setuptools as the build backend.
+- Stack: Python, FastAPI, PyJWT with cryptography, stdlib `sqlite3`/`hashlib`/`pathlib`, pytest with httpx2 (AM-9), and setuptools as the build backend.
 - uvicorn is added only at M1M.
 - Not used: python-multipart, any ORM, Docker, or a frontend.
 

@@ -7,10 +7,11 @@ name = "content-boundary-lab"
 version = "0.0.0"
 description = "Independent educational laboratory for security code review and remediation."
 requires-python = ">=3.12"
-dependencies = []
+dependencies = ["fastapi==0.141.1"]
 
 [project.optional-dependencies]
 dev = [
+    "httpx2==2.13.1",
     "pytest==9.1.1",
 ]
 
@@ -20,4 +21,5 @@ namespaces = false
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
-addopts = ["--strict-config", "--strict-markers"]
+addopts = ["--strict-config", "--strict-markers", "-m", "not clean_env"]
+markers = ["clean_env: exact installed-set check; run with `-m clean_env` in a fresh venv built from requirements.lock"]
