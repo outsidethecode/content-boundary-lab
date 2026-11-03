@@ -1,6 +1,6 @@
 # Content Boundary Lab: design decisions
 
-**Status:** M0 accepted on 2026-11-03, and the design handover approved the same day. M1A (project scaffold) and M1B-1 (dependency foundation, AM-9) are implemented and committed, and M1B-2 (application factory) is implemented. Nothing from M1C onwards has started: no security findings and no application business logic exist yet. This file is the entry point for implementation sessions.
+**Status:** M0 accepted on 2026-11-03, and the design handover approved the same day. M1A (project scaffold), M1B-1 (dependency foundation, AM-9) and M1B-2 (application factory) are implemented and committed, and M1C (source isolation guards) is implemented. Nothing from M1D onwards has started: no security findings and no application business logic exist yet. This file is the entry point for implementation sessions.
 
 **Precedence:** the amendments in §3, then the [M0 Addendum](milestones/M0-ADDENDUM.md), then the [M0 proposal](milestones/M0.md). The two milestone files are preserved records and are not edited. Any later change is added here as a new amendment.
 
@@ -140,6 +140,8 @@ Details are in the addendum sections cited. Where this summary and the addendum 
 - AST guards enforce the boundary.
 - No environment variable, CLI argument or settings field can select a seam.
 - Lab apps run in-process only.
+- **M1C guards** (`tests/guards/test_isolation.py`) are AST checks. Over `src/` they flag: imports of `labs` or `tests`; environment-variable, `sys.argv` and command-line-parser use outside `ENVIRONMENT_READERS` (empty; a module is added by a reviewed edit in the slice that needs it); identifiers containing the word "vulnerable" or a listed synonym; `eval`, `exec`, `__import__`, code-loading modules such as `importlib`, and `sys.path`/`sys.modules` access; and any `FastAPI(...)` construction that leaves the documentation URLs enabled, whether written directly, as `module.FastAPI(...)` or through a `from fastapi import FastAPI as name` alias. Any mention of `dependency_overrides` is flagged in `src/` and `labs/`; in `tests/` only a read-only comparison is allowed (AM-10).
+- **M1C evidence and limits:** every rule is run against bad and good samples in each test run, and on 2026-11-03 a bad file injected into a scratch copy of the tree, one per violation class, failed exactly the expected guard. The guards catch accidents and drift (R7); they do not prove isolation, and they cannot see a selector that is named differently or reached through syntax the rules do not list. A `FastAPI` subclass or a rebinding such as `API = FastAPI` is not followed.
 
 **Working agreement**
 - Follow the user-level `~/CLAUDE.md` and the slice rules in Addendum §6, as amended by AM-5 and AM-6.
