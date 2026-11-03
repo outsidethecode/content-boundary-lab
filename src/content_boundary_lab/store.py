@@ -1,7 +1,9 @@
 """SQLite data foundation: schema, connections and transactions (stdlib sqlite3 only).
 
 The engagements table is the server-side authority for roles, expiry and revocation, but this module makes no
-authorisation decisions (M1F). The audit writing API and the application-connection authorizer are M1D-3.
+authorisation decisions (M1F). connect() is the one way application code gets a connection: it refuses a schema that
+differs from the one initialise_schema() creates and installs a default-deny authorizer. Both are described, with
+their limits, in docs/decisions.md (AM-13).
 """
 
 import sqlite3
@@ -27,6 +29,10 @@ class StoreError(RuntimeError):
 
 class SchemaVersionError(StoreError):
     """The database does not have the supported schema version."""
+
+
+class SchemaIntegrityError(StoreError):
+    """The database schema is not the one this version of the code creates: objects are missing, added or modified."""
 
 
 # One complete initial schema, applied in one transaction by initialise_schema(). Times are INTEGER microseconds
@@ -117,6 +123,82 @@ _SCHEMA: tuple[str, ...] = (
 )
 
 
+# Application connections run under a default-deny authorizer. It decides on SQLite's action codes and on object
+# names, never on SQL text. It governs the connections handed out by connect(): code that holds one can replace it,
+# and the audit triggers in the schema are a separate barrier. UPDATE and DELETE are permitted on the business tables
+# because their invariants are held by constraints and triggers; the audit table accepts INSERT only. The engine's own
+# upkeep of sqlite_sequence is not reported to the authorizer, so every write to a sqlite_* table is refused.
+_ALWAYS_PERMITTED = frozenset(
+    {
+        sqlite3.SQLITE_SELECT,
+        sqlite3.SQLITE_READ,
+        sqlite3.SQLITE_TRANSACTION,
+        sqlite3.SQLITE_SAVEPOINT,
+        sqlite3.SQLITE_RECURSIVE,
+    }
+)
+_DATA_CHANGES = frozenset({sqlite3.SQLITE_INSERT, sqlite3.SQLITE_UPDATE, sqlite3.SQLITE_DELETE})
+_READABLE_PRAGMAS = frozenset({"foreign_keys", "user_version", "busy_timeout"})
+_DENIED_FUNCTIONS = frozenset({"load_extension"})
+_AUDIT_TABLE = "audit_events"
+
+
+def _authorize(action: int, arg1: str | None, arg2: str | None, database: str | None, source: str | None) -> int:
+    """The authorizer callback: SQLITE_OK or SQLITE_DENY for one action of a statement being compiled."""
+    if action in _ALWAYS_PERMITTED:
+        return sqlite3.SQLITE_OK
+    if action == sqlite3.SQLITE_FUNCTION:
+        return sqlite3.SQLITE_DENY if (arg2 or "").lower() in _DENIED_FUNCTIONS else sqlite3.SQLITE_OK
+    if action == sqlite3.SQLITE_PRAGMA:  # a bare read of a setting the store relies on; a value or argument is a write
+        return sqlite3.SQLITE_OK if arg2 is None and (arg1 or "").lower() in _READABLE_PRAGMAS else sqlite3.SQLITE_DENY
+    if action in _DATA_CHANGES and arg1 is not None:
+        table = arg1.lower()
+        if table.startswith("sqlite_") or (table == _AUDIT_TABLE and action != sqlite3.SQLITE_INSERT):
+            return sqlite3.SQLITE_DENY
+        return sqlite3.SQLITE_OK
+    return sqlite3.SQLITE_DENY  # DDL, ATTACH, ANALYZE, REINDEX, VACUUM and any action code a later SQLite adds
+
+
+_SCHEMA_OBJECTS = "SELECT type, name, tbl_name, sql FROM sqlite_master ORDER BY type, name"
+
+
+def _reference_schema() -> list[tuple]:
+    """Every schema object that _SCHEMA creates, read back from a scratch in-memory database (about 0.3 ms)."""
+    reference = sqlite3.connect(":memory:")
+    try:
+        for statement in _SCHEMA:
+            reference.execute(statement)
+        return [tuple(row) for row in reference.execute(_SCHEMA_OBJECTS)]
+    finally:
+        reference.close()
+
+
+def _names(keys: set[tuple[str, str]]) -> str:
+    shown = [ascii(f"{kind} {name}")[:60] for kind, name in sorted(keys)[:3]]
+    return ", ".join(shown) + (f" and {len(keys) - 3} more" if len(keys) > 3 else "")
+
+
+def _describe_drift(expected: list[tuple], actual: list[tuple]) -> str:
+    """Which objects differ, by type and name only: bounded, with no definitions and control characters escaped."""
+    wanted = {(kind, name): rest for kind, name, *rest in expected}
+    found = {(kind, name): rest for kind, name, *rest in actual}
+    differences = {
+        "missing": wanted.keys() - found.keys(),
+        "unexpected": found.keys() - wanted.keys(),
+        "modified": {key for key in wanted.keys() & found.keys() if wanted[key] != found[key]},
+    }
+    parts = [f"{label} {_names(keys)}" for label, keys in differences.items() if keys]
+    return f"database schema does not match version {SCHEMA_VERSION} ({'; '.join(parts) or 'duplicate entries'})"
+
+
+def _verify_schema(conn: sqlite3.Connection) -> None:
+    """Compare every object in the database with the reference. This is a check at the moment of the call only."""
+    expected = _reference_schema()
+    actual = [tuple(row) for row in conn.execute(_SCHEMA_OBJECTS)]
+    if actual != expected:
+        raise SchemaIntegrityError(_describe_drift(expected, actual))
+
+
 def _open(path: Path, *, create: bool) -> sqlite3.Connection:
     """A configured connection. Foreign keys are enabled, and verified, before any transaction begins."""
     if sqlite3.sqlite_version_info < MINIMUM_SQLITE:
@@ -155,12 +237,16 @@ def transaction(conn: sqlite3.Connection) -> Iterator[sqlite3.Connection]:
 
 
 def initialise_schema(path: Path) -> None:
-    """Create the schema in a new, empty database. Idempotent for the supported version, otherwise refuses."""
+    """Create the schema in a new, empty database.
+
+    A database already at the supported version is only verified, never repaired; any other version is refused.
+    """
     conn = _open(path, create=True)
     try:
         with transaction(conn):
             version = conn.execute("PRAGMA user_version").fetchone()[0]
             if version == SCHEMA_VERSION:
+                _verify_schema(conn)
                 return
             if version != 0:
                 raise SchemaVersionError(_unsupported(version))
@@ -173,12 +259,18 @@ def initialise_schema(path: Path) -> None:
 
 
 def connect(path: Path) -> sqlite3.Connection:
-    """An application connection to an existing, initialised database. It never creates or upgrades one."""
+    """An application connection to an existing, initialised database. It never creates or upgrades one.
+
+    The schema version and every schema object must match what initialise_schema() creates, otherwise the connection
+    is closed and an error raised. The authorizer is installed only after that check.
+    """
     conn = _open(path, create=False)
     try:
         version = conn.execute("PRAGMA user_version").fetchone()[0]
         if version != SCHEMA_VERSION:
             raise SchemaVersionError(_unsupported(version))
+        _verify_schema(conn)
+        conn.set_authorizer(_authorize)
     except BaseException:
         conn.close()
         raise

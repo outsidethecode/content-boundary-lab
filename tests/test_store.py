@@ -494,6 +494,9 @@ def test_a_revocation_is_visible_to_the_next_statement_on_another_connection_onc
 
 
 def test_audit_events_reject_update_delete_and_overwrite(conn):
+    # This tests the trigger layer on its own. The connection's authorizer would refuse the UPDATE and DELETE
+    # statements first (tests/test_store_hardening.py covers that), so it is removed for this test.
+    conn.set_authorizer(None)
     seq = _audit(conn)
     original = [tuple(row) for row in conn.execute("SELECT * FROM audit_events")]
     attempts = [
