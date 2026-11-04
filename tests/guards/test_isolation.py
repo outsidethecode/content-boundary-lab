@@ -17,9 +17,10 @@ LAB_FILES = sorted((ROOT / "labs").rglob("*.py"))  # labs/ is introduced later; 
 TEST_FILES = sorted((ROOT / "tests").rglob("*.py"))
 
 # Modules, relative to the package, allowed to read environment variables or command-line arguments.
-# Empty on purpose: add a module only in the slice that needs it, after review, and never to select an
-# implementation (decisions §4).
-ENVIRONMENT_READERS: frozenset[str] = frozenset()
+# Add a module only in the slice that needs it, after review, and never to select an implementation (decisions §4).
+# The runner (M1M) is the composition root and takes its command line from argparse; tests/guards/test_runner_scope.py
+# holds it to a fixed list of options and to reading no environment variable at all.
+ENVIRONMENT_READERS: frozenset[str] = frozenset({"runner.py"})
 
 OVERRIDES = "dependency_overrides"
 FORBIDDEN_IMPORT_ROOTS = {"labs", "tests"}

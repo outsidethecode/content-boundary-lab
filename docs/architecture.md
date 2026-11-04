@@ -79,6 +79,7 @@ The trust boundaries (TB1 to TB6) are defined in [threat-model.md](threat-model.
 | Module | Responsibility | Seam or finding | Main tests |
 |---|---|---|---|
 | [app.py](../src/content_boundary_lab/app.py) | `create_app(Dependencies)`: explicit dependencies, nine routes, no served documentation, no default scanner | isolation (M0 §5.5) | [test_app.py](../tests/test_app.py) |
+| [runner.py](../src/content_boundary_lab/runner.py) | The composition root: the only code that builds `Dependencies`, from what the operator names and what the code fixes (clock, scanner, loopback address); the start-up checks and banner; the commands of section 14 | isolation (M0 §5.5), M1M | [test_runner.py](../tests/test_runner.py), [test_runner_workflow.py](../tests/test_runner_workflow.py), [test_runner_maintenance.py](../tests/test_runner_maintenance.py), [test_runner_scope.py](../tests/guards/test_runner_scope.py) |
 | [identity.py](../src/content_boundary_lab/identity.py), [settings.py](../src/content_boundary_lab/settings.py) | ES256 verification against 1 to 8 configured P-256 keys, zero clock skew, header `alg`/`typ`/`kid` only; trusted configuration, and the refusal of the reserved `system:` issuer namespace | F-01 | [test_identity.py](../tests/test_identity.py), [test_settings.py](../tests/test_settings.py) |
 | [request_flow.py](../src/content_boundary_lab/request_flow.py) | The one order every request follows (section 5); `decide`, `proceed`, `respond`, and `run_system` for system jobs | all | [test_engagements_api.py](../tests/test_engagements_api.py), [test_request_flow_phases.py](../tests/test_request_flow_phases.py) |
 | [authz.py](../src/content_boundary_lab/authz.py) | `authorize_engagement`: role, end date and revocation of the caller's engagement in the URL's production, from SQLite; a closed action policy | F-06 | [test_authz.py](../tests/test_authz.py) |
@@ -108,7 +109,8 @@ Every route requires a verified token ([test_every_route_requires_a_token.py](..
 because M0 makes them the lab's own work and not a caller's: `trust.rescan` (an internal re-entry into the gate) and
 `promotion.promote` with `promotion.reconcile` (M0's "System job"). They are functions for the operator's code, run under
 the named system actors `system:content-boundary-lab` / `rescan` and `promote`, and a guard fails if anything else starts
-one ([test_delivery_scope.py](../tests/guards/test_delivery_scope.py)).
+one ([test_delivery_scope.py](../tests/guards/test_delivery_scope.py)). Since M1M the operator reaches them through the
+runner's `promote`, `rescan` and `reconcile` commands (section 14); that is a command line, not a route.
 
 ## 5. One request, in order
 
@@ -236,9 +238,9 @@ records where the reference decision is made, and where the name in the Addendum
 | Status | What |
 |---|---|
 | Implemented | token verification; engagement authorisation; the scoped asset read; the delivery workflow from declaration to promotion; the verdict cache and the hash-bound trust gate; the audit trail; the recovery passes (rescan, promotion reconcile) |
-| Simulated | the identity provider (a test token issuer under `tests/`); the scanner (one synthetic marker); the object stores (two local directories) |
+| Simulated | the identity provider (a development token issuer under `tools/`, and an in-memory one under `tests/`); the scanner (one synthetic marker); the object stores (two local directories) |
 | Conceptual | cloud buckets, pre-signed URLs, OIDC federation, CSAP's separate components |
-| Not built | a runnable server and its composition (M1M); the vulnerable variants, their exploits and the finding write-ups (M2); the optional F-01 and F-05 variants |
+| Not built | recovery of a delivery stranded in `SEALING` (an operator investigates; A-J7); the vulnerable variants, their exploits and the finding write-ups (M2); the optional F-01 and F-05 variants |
 
 ## 12. CSAP analogy and cloud mapping
 
@@ -266,9 +268,75 @@ These are analogies, not conformance, and nothing in the code depends on them.
 - Verdict validity is checked at acceptance and not at promotion (a documented gap in the Addendum).
 - The scanner is synthetic. The signature allowlist is illustrative and easy to bypass.
 - A delivery stranded in `SEALING` (a seal or rescan that met a missing or changed file, or a failed commit) is not
-  recovered (A-J7).
+  recovered (A-J7): `reconcile` lists it and moves nothing, because M0 gives `SEALING` no abandonment rule, and an
+  operator must investigate it. This is a known availability limitation.
 - The asset route is registered first and its path parameters are greedy, so a `GET` whose delivery id contains `assets/`
-  is answered by the asset route (403, not 404); malformed-URL answers are not uniform across routes.
-- `ingest.reconcile` and `promotion.reconcile` are maintenance-window operations; neither may be scheduled until an
-  active-upload and active-promotion exclusion exists (M1M).
+  is answered by the asset route (403, not 404); malformed-URL answers are not uniform across routes. Every route
+  authenticates before it looks at the path.
+- `ingest.reconcile` and `promotion.reconcile` are maintenance-window operations, and the runner now enforces the window
+  for the lab's own processes (section 14); they are still not scheduled, and the exclusion is advisory and local.
 - The audit table is not tamper-evident, and nothing here rate-limits requests that each take the writer lock.
+
+## 14. Running the lab
+
+[runner.py](../src/content_boundary_lab/runner.py) is the one place the lab's trusted dependencies are chosen. It builds
+`Dependencies` and nothing else does ([test_runner_scope.py](../tests/guards/test_runner_scope.py)). The operator **names**
+the settings file (and through it the trusted issuer, the audience and the public keys), the database, the trusted root, the
+quarantine root, the upload limit and the port. The code **fixes** the clock (the system clock, in UTC), the scanner and its
+policy (the synthetic marker scanner, whose identity and policy fingerprint every verdict carries) and the address
+(`127.0.0.1`). There is no environment variable, no default for any option, and no option for an address, a scanner, a
+clock, a policy or a switch. The development token issuer ([dev_token_issuer.py](../tools/dev_token_issuer.py)) stands
+outside the package: it makes a throwaway key, the settings that name only its public half, and short-lived tokens.
+
+| Command | What it does | Holds the quarantine root |
+|---|---|---|
+| `init` | creates the schema in a new database, which only its owner can read (the two roots must already exist) | no |
+| `seed-demo` | puts two synthetic productions, each with a coordinator and a vendor, in a database that has none | no |
+| `serve` | composes the application, prints the banner, and runs `uvicorn` on `127.0.0.1` and the port | shared, while serving |
+| `promote` | promotes one accepted delivery (`promotion.promote`, as the `promote` system actor) | shared |
+| `rescan` | re-enters the gate for one delivery whose scan failed or whose verdict no longer counts (`trust.rescan`, as the `rescan` system actor) | shared |
+| `reconcile` | `ingest.reconcile`, `promotion.reconcile`, and a listing of the deliveries stranded in `SEALING` | exclusive |
+
+**Starting is all or nothing.** Before it takes a lock, prints or binds, a start loads the settings and the key set (a
+missing or unreadable file, a URL, no keys, or private key material ends it), checks the database (a regular file, the
+user's own, closed to group and others, at the lab's schema version with every schema object as expected) and each root (a
+directory and not a link, the user's own, closed to group and others, and the two separate). A refusal says which check
+failed and repeats nothing a file held, and the disk is as it was. Parent directories are not examined: the trusted
+operator controls where the lab keeps its data.
+
+**What the processes tell each other.** Reconciliation removes the server's own scratch files and finishes or reports what a
+crash left behind. During an upload or a promotion that would damage the work, and nothing outside the process can tell the
+two apart, so each process says what it is doing through a `flock(2)` on the quarantine root directory
+([quarantine.hold](../src/content_boundary_lab/quarantine.py)):
+
+| Holder | Mode | Refused while |
+|---|---|---|
+| the server, a promotion, a rescan | shared | `reconcile` runs |
+| `reconcile` | exclusive | any of them runs |
+
+Nothing waits: a refused command exits at once with status 3. (uvicorn also exits with 3 when it cannot start, for
+instance when the port is taken; the message says which.) The kernel drops the lock when its holder ends, by a crash or a
+kill, so there is no stale lock to clear. It is advisory (a process that does not ask is not kept out), it means one local
+filesystem, and a person who can write to the roots can do anything. With the lock held exclusive no seal or rescan is in
+flight, so every delivery `reconcile` lists as stranded in `SEALING` is certainly not being worked on. The lab still does
+not move one, and adds no timeout, command or audit reason for it: M0 gives `SEALING` no abandonment rule, so an operator
+must investigate each one. That is a known availability limitation and not a claim that every recovery path is complete
+(A-J7, [decisions.md](decisions.md) AM-27).
+
+**The server.** `serve` runs `uvicorn` 0.54.0, the minimal install, as a library, with an application object and these
+settings fixed as literals in one call: `host="127.0.0.1"`, the operator's port, `workers=1`, `reload=False`, `http="h11"`,
+`loop="asyncio"`, `proxy_headers=False`, `server_header=False`. Nothing else is passed, so nothing outside that call can
+change it: left to its defaults uvicorn takes the worker count from `WEB_CONCURRENCY` and believes `X-Forwarded-*` from the
+loopback, and its `UVICORN_*` variables and `.env` loading belong to its own command line, which is not used. The real server
+is imported in one function of the runner, and not at all by a lab that does not serve.
+
+**What the real run showed.** `pytest -m real_server` ([test_real_server.py](../tests/test_real_server.py)) starts that
+command as a separate program in an environment holding `WEB_CONCURRENCY=4`, `FORWARDED_ALLOW_IPS=*` and `UVICORN_HOST=0.0.0.0`,
+and talks to it over TCP with `http.client`: one process, one listener at `127.0.0.1:<port>` and no other socket (read with
+`lsof`), the banner before uvicorn's own start-up lines, the generic 401, signed development tokens, the whole delivery path
+with a 3 MiB streamed upload and download that are the exact bytes, 413 for an oversize upload declared either way, cross-
+production denial, a revoked vendor's valid token refused on the next request, a client that disconnects in the middle of an
+upload and of a download (no descriptor left open, no staged file, the delivery still `INITIATED`, the server still
+serving), `reconcile` refused while the server runs, and a clean stop on SIGINT that releases the port and the lock. It is
+one server on one machine with synthetic data. It does not exercise TLS, load, hostile clients or malformed requests beyond
+those named, and it is not a statement about any other use.

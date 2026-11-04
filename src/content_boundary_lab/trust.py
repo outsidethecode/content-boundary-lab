@@ -136,6 +136,7 @@ _RESCAN_READ = (
     "FROM deliveries AS d WHERE d.id = ?"
 )
 _PRODUCTION_READ = "SELECT d.production_id FROM deliveries AS d WHERE d.id = ?"
+_STRANDED = "SELECT d.id FROM deliveries AS d WHERE d.state = 'SEALING' ORDER BY d.rowid"  # M1M: a listing for maintenance
 _RESTART_FAILED = (
     "UPDATE deliveries SET state = 'SEALING', state_reason = NULL, verdict_id = NULL "
     "WHERE id = ? AND production_id = ? AND owner_subject_id = ? AND state = 'SCAN_FAILED'"
@@ -641,6 +642,22 @@ def _production_of(database_path: Path, delivery_id: str) -> str | None:
     finally:
         conn.close()
     return None if row is None else row[0]
+
+
+def stranded(database_path: Path) -> tuple[str, ...]:
+    """The ids of the deliveries in SEALING, oldest first. A read: it changes nothing and records nothing (A-J7).
+
+    A delivery is in SEALING while a seal or a rescan inspects its bytes, and stays there if that process ends before it
+    records an outcome. Only a listing is offered. Whether a delivery in SEALING is abandoned is knowable only when no seal or
+    rescan can be running, which `quarantine.hold(exclusive=True)` establishes for the lab's own processes; what is then to
+    be done with one (a retryable scan failure, or an integrity failure for a file that is gone) is a decision M0 does not
+    make, so nothing moves a stranded delivery. It accepts nothing and promotes nothing; a vendor declares a new delivery.
+    """
+    conn = store.connect(database_path)
+    try:
+        return tuple(row[0] for row in conn.execute(_STRANDED))
+    finally:
+        conn.close()
 
 
 def _refuse(

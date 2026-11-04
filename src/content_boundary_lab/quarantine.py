@@ -26,6 +26,7 @@ no-follow open. Nothing here is durable across a power failure: the staged file 
 directory is not, and nothing claims otherwise. A network filesystem is not supported.
 """
 
+import fcntl
 import hashlib
 import io
 import os
@@ -33,6 +34,7 @@ import re
 import secrets
 import stat
 from collections.abc import Iterator
+from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
 from typing import BinaryIO
@@ -102,6 +104,40 @@ def _open_root(root: Path) -> int:
     if os.open not in os.supports_dir_fd or os.link not in os.supports_dir_fd or os.link not in os.supports_follow_symlinks:
         raise QuarantineError("this platform cannot open or link a file relative to a directory descriptor")
     return os.open(root, _DIRECTORY)
+
+
+class RootBusy(QuarantineError):
+    """Another process holds the quarantine root in a way that excludes this one. Nothing waited and nothing was changed."""
+
+
+@contextmanager
+def hold(root: Path, *, exclusive: bool) -> Iterator[None]:
+    """Hold the advisory lock on the quarantine root for the length of the block, or raise RootBusy at once.
+
+    This is how the lab's processes tell each other what they are doing, and the only thing that lets a maintenance pass
+    know that nobody is. A process that reads or writes quarantine (the server, a promotion, a rescan) holds the root
+    shared while it works; reconciliation holds it exclusive, so it cannot start while any of them runs and none can start
+    while it does. The lock is a flock(2) on the root directory itself, so it follows the directory whatever path names it,
+    it needs no file in the root, and the kernel drops it when its holder ends, by a crash or a kill included: there is
+    never a stale lock to clear. It never waits, and it does not read or change anything in the root.
+
+    It is advisory and only as wide as the programs that ask for it: a process that does not call this is not kept out, and
+    a person with write access to the root can do anything. It means one local filesystem; where flock does not work the
+    root is refused and not worked in.
+    """
+    if type(exclusive) is not bool:
+        raise TypeError(f"exclusive must be a bool, got {type(exclusive).__name__}")
+    fd = _open_root(root)
+    try:
+        try:
+            fcntl.flock(fd, (fcntl.LOCK_EX if exclusive else fcntl.LOCK_SH) | fcntl.LOCK_NB)
+        except BlockingIOError:
+            raise RootBusy("the quarantine root is in use by another process") from None
+        except OSError:
+            raise QuarantineError("the quarantine root cannot be locked here, so it is not used") from None
+        yield
+    finally:
+        os.close(fd)  # closing the descriptor is what releases the lock
 
 
 def _open_incoming(root_fd: int, *, create: bool) -> int:

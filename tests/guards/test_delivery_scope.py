@@ -32,6 +32,8 @@ SCOPED_READ = (r"\bd\.id = \?", r"\bd\.production_id = \?", r"\bissuer = \?", r"
 OWNER_READ = SCOPED_READ + (r"\be\.subject_id = d\.owner_subject_id",)  # ingest: the caller is the delivery's owner
 COORDINATOR_READ = SCOPED_READ + (r"\brole = 'coordinator'",)  # the same scope, for the coordinator of the delivery's production
 SYSTEM_READ = re.compile(r"SELECT [\w., ]+ FROM deliveries AS d WHERE d\.id = \?$")  # the rescan: the one delivery the operator named
+# M1M: the one listing trust may make besides that read: the ids of the deliveries in SEALING, for a pass of maintenance (A-J7).
+STRANDED_LISTING = re.compile(r"SELECT d\.id FROM deliveries AS d WHERE d\.state = 'SEALING' ORDER BY d\.rowid$")
 # The modules that may change a delivery, each by compare-and-set from the state it owns, naming the delivery and its
 # production and what else binds the step, and setting only the columns that step writes: ingest INITIATED -> UPLOADED;
 # trust the seal (UPLOADED -> SEALING -> its outcome) and the rescan (SCAN_FAILED or SCAN_PASSED -> SEALING, which keeps
@@ -105,8 +107,8 @@ def sql_violations(relative: Path, source: str) -> list[str]:
             changeable_from, binding = SETTERS[relative]
             if verb == "SELECT":
                 if relative == TRUST:  # the seal reads through ingest.get_delivery_in_scope; only the rescan reads by id
-                    if not SYSTEM_READ.fullmatch(text):
-                        problems.append(f"{where} that is not the rescan's read of the one delivery the operator named")
+                    if not SYSTEM_READ.fullmatch(text) and not STRANDED_LISTING.fullmatch(text):
+                        problems.append(f"{where} that is neither the rescan's read of the one delivery the operator named nor the stranded listing")
                 elif relative == ACCEPTANCE:
                     if not all(re.search(pattern, text) for pattern in COORDINATOR_READ):
                         problems.append(f"{where} that is not the coordinator-scoped read")
@@ -307,6 +309,27 @@ RESCAN_BAD = {
 @pytest.mark.parametrize("statement", RESCAN_BAD.values(), ids=list(RESCAN_BAD))
 def test_the_guard_flags_a_rescan_that_reads_or_restarts_more_than_it_may(statement):
     assert sql_violations(TRUST, _module(statement))
+
+
+STRANDED = "SELECT d.id FROM deliveries AS d WHERE d.state = 'SEALING' ORDER BY d.rowid"
+STRANDED_BAD = {
+    "a listing of another state": STRANDED.replace("'SEALING'", "'SCAN_PASSED'"),
+    "a listing of every delivery": "SELECT d.id FROM deliveries AS d ORDER BY d.rowid",
+    "a listing with more columns": STRANDED.replace("d.id", "d.id, d.storage_key"),
+    "a listing that adds a condition it should not skip": STRANDED.replace("ORDER BY d.rowid", "OR 1 = 1 ORDER BY d.rowid"),
+    "a listing of more than the id": STRANDED.replace("SELECT d.id", "SELECT *"),
+}
+
+
+@pytest.mark.parametrize("statement", STRANDED_BAD.values(), ids=list(STRANDED_BAD))
+def test_the_guard_flags_a_listing_in_trust_that_is_wider_than_the_stranded_one(statement):
+    assert sql_violations(TRUST, _module(statement))
+
+
+def test_the_guard_accepts_the_stranded_listing_in_trust_only():
+    assert sql_violations(TRUST, _module(STRANDED)) == []
+    for other in (INGEST, ACCEPTANCE, PROMOTION, Path("management.py"), STORE):
+        assert sql_violations(other, _module(STRANDED)), other
 
 
 def test_the_guard_accepts_the_rescans_read_and_its_two_restarts_in_trust_only():

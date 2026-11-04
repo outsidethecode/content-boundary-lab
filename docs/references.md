@@ -60,11 +60,16 @@ lock is valid for one environment (CPython 3.13.7 on macOS arm64); the build bac
 | fastapi | 0.141.1 | the web framework (with starlette 1.3.1, pydantic 2.13.4, anyio 4.14.2) |
 | PyJWT | 2.15.1 | ES256 token verification, called only with the configured public keys and an explicit algorithm list |
 | cryptography | 50.0.2 | P-256 public keys (with cffi 2.1.1 and pycparser 3.0, needed only by `cryptography`) |
+| uvicorn | 0.54.0 | the local HTTP server, the minimal install without its `standard` extra (with click 8.5.0, needed only by `uvicorn`; h11 0.16.0 was already locked). Both are pure-Python wheels, BSD-3-Clause |
 | pytest | 9.1.1 | the test runner (development) |
 | httpx2 | 2.13.1 | the test client (development) |
 | setuptools | 84.2.1 | the build backend |
 
-The full transitive set is 23 distributions; `tests/test_environment.py` checks that the installed set equals the lock.
+The full transitive set is 25 distributions; `tests/test_environment.py` checks that the installed set equals the lock. The
+two added on 2026-11-04 (M1M) were taken at the exact versions the security reviewer approved, after a read-only PyPI
+metadata lookup; their wheels were downloaded into a new empty directory and each SHA-256 was compared with the digest PyPI
+publishes for it (both matched) before it was written to the lock; a fresh environment was then built from the lock with
+`--require-hashes --only-binary=:all:` (pip checks every hash again) and `pip check` was clean.
 Dependency vulnerability scanning is planned for a later stage (M4) and has not been run.
 
 ## 4. Open reference items
@@ -77,5 +82,12 @@ Dependency vulnerability scanning is planned for a later stage (M4) and has not 
 | V6 | RFC 8725, RFC 2606 and Python path-join semantics, from memory in M0. (The FastAPI behaviour that V6 also covered was verified at M1B.) |
 | V9 | A recheck of every CWE and ASVS mapping, including CWE-354. |
 | V10 | GitHub Actions hardening guidance, and the licensing of any quoted ASVS or CWE text. |
+
+V11 (the HTTP server) is closed. `uvicorn` 0.54.0 (released 2026-09-25) and `click` 8.5.0 (released 2026-08-26) were
+approved by the security reviewer on 2026-11-04 and are locked (section 3). The installed `uvicorn.run` accepts every
+keyword the runner passes, which was read from the installed package and then shown by running the real server; what that
+run does and does not show is in [architecture.md](architecture.md) section 14 and `tests/test_real_server.py`. Which
+`uvicorn` settings read an environment variable was read from its source in the installed 0.54.0 (`WEB_CONCURRENCY` and
+`FORWARDED_ALLOW_IPS` in `uvicorn/config.py`, the `UVICORN_` prefix in its command line); a later version may differ.
 
 The mappings are rechecked, and the retrieval dates renewed, in the publication stage (M5).

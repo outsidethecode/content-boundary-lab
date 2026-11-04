@@ -527,6 +527,11 @@ def add_production(conn: sqlite3.Connection, clock: Clock, name: str) -> str:
     return production_id
 
 
+def has_productions(conn: sqlite3.Connection) -> bool:
+    """Whether the database holds any production: the runner seeds synthetic data only into one that holds none."""
+    return conn.execute("SELECT EXISTS (SELECT 1 FROM productions)").fetchone()[0] == 1
+
+
 def add_subject(conn: sqlite3.Connection, clock: Clock, issuer: str, subject: str, display_name: str) -> int:
     """Record a verified (issuer, subject) identity. display_name is metadata, never an authority."""
     cursor = conn.execute(

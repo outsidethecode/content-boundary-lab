@@ -11,6 +11,7 @@ dependencies = [
     "cryptography==50.0.2",
     "fastapi==0.141.1",
     "PyJWT==2.15.1",
+    "uvicorn==0.54.0",
 ]
 
 [project.optional-dependencies]
@@ -25,5 +26,8 @@ namespaces = false
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
-addopts = ["--strict-config", "--strict-markers", "-m", "not clean_env"]
-markers = ["clean_env: exact installed-set check; run with `-m clean_env` in a fresh venv built from requirements.lock"]
+addopts = ["--strict-config", "--strict-markers", "-m", "not clean_env and not real_server"]
+markers = [
+    "clean_env: exact installed-set check; run with `-m clean_env` in a fresh venv built from requirements.lock",
+    "real_server: starts the real server on 127.0.0.1 and speaks HTTP to it; run with `-m real_server`",
+]

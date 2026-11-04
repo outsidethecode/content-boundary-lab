@@ -15,15 +15,17 @@ LOCK = ROOT / "requirements.lock"
 EXACT_PIN = re.compile(r"(?P<name>[A-Za-z0-9][A-Za-z0-9._-]*)==(?P<version>[A-Za-z0-9._+!-]+)")
 SHA256_OPTION = re.compile(r"--hash=sha256:[0-9a-f]{64}")
 
-# The reviewed dependency set (docs/decisions.md AM-9, AM-14). Changing it is a deliberate edit of this test.
-APPROVED_RUNTIME_PINS = {"cryptography": "50.0.2", "fastapi": "0.141.1", "pyjwt": "2.15.1"}
+# The reviewed dependency set (docs/decisions.md AM-9, AM-14, AM-27). Changing it is a deliberate edit of this test.
+# uvicorn is the minimal install (not the `standard` extra) and brings click; both were approved for M1M (V11).
+APPROVED_RUNTIME_PINS = {"cryptography": "50.0.2", "fastapi": "0.141.1", "pyjwt": "2.15.1", "uvicorn": "0.54.0"}
 APPROVED_DEV_PINS = {"httpx2": "2.13.1", "pytest": "9.1.1"}
-TRANSITIVE_ONLY = {"cffi", "pycparser"}  # locked, never declared directly
+TRANSITIVE_ONLY = {"cffi", "click", "pycparser"}  # locked, never declared directly
 APPROVED_LOCK = {
     "annotated-doc": "0.0.4",
     "annotated-types": "0.7.0",
     "anyio": "4.14.2",
     "cffi": "2.1.1",
+    "click": "8.5.0",
     "cryptography": "50.0.2",
     "fastapi": "0.141.1",
     "h11": "0.16.0",
@@ -43,6 +45,7 @@ APPROVED_LOCK = {
     "truststore": "0.10.5",
     "typing-extensions": "4.16.0",
     "typing-inspection": "0.4.2",
+    "uvicorn": "0.54.0",
 }
 
 
@@ -194,9 +197,9 @@ def test_direct_dependencies_are_exactly_the_approved_pins():
     assert pins(project["optional-dependencies"]["dev"]) == APPROVED_DEV_PINS
 
 
-def test_the_lock_is_exactly_the_reviewed_set_of_23_distributions():
+def test_the_lock_is_exactly_the_reviewed_set_of_25_distributions():
     assert _locked_versions() == APPROVED_LOCK
-    assert len(APPROVED_LOCK) == 23
+    assert len(APPROVED_LOCK) == 25
 
 
 def test_transitive_distributions_are_locked_but_not_declared_directly():

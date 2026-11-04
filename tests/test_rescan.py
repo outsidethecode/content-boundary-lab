@@ -305,6 +305,33 @@ def test_a_missing_file_leaves_the_delivery_in_sealing_as_a_seal_does_and_a_seco
     assert refused.value.reason is AuditReason.STATE_CONFLICT
 
 
+def test_the_stranded_listing_names_the_deliveries_in_sealing_and_no_others(make_lab):
+    """A-J7 stays open (no abandonment rule is decided), but it is no longer invisible: a pass of maintenance can list them."""
+    lab = make_lab("stranded", CountingScanner())
+    assert trust.stranded(lab.path) == ()
+    stuck = [lab.seed_delivery(state="SEALING").id, lab.seed_delivery(state="SEALING").id]
+    for state in ("INITIATED", "UPLOADED", "REJECTED", "SCAN_FAILED", "SCAN_PASSED", "ACCEPTED", "INTEGRITY_FAILED"):
+        lab.seed_delivery(state=state)
+    assert trust.stranded(lab.path) == tuple(stuck)  # in the order they were made
+
+
+def test_the_stranded_listing_changes_nothing_and_records_nothing(make_lab):
+    lab = make_lab("stranded-quiet", CountingScanner())
+    delivery = lab.seed_delivery(state="SEALING")
+    rows, trail_before = lab.delivery_rows(), lab.audit_rows()
+    assert trust.stranded(lab.path) == (delivery.id,)
+    assert (lab.delivery_rows(), lab.audit_rows()) == (rows, trail_before)
+
+
+def test_a_delivery_found_stranded_is_still_not_moved_by_anything_but_a_rescan_or_a_seal(make_lab):
+    lab = make_lab("stranded-final", CountingScanner())
+    delivery = lab.seed_delivery(state="SEALING")
+    with pytest.raises(trust.RescanRefused) as refused:
+        rescan(lab, delivery.id)
+    assert refused.value.reason is AuditReason.STATE_CONFLICT
+    assert trust.stranded(lab.path) == (delivery.id,) and lab.delivery_row(delivery.id)["state"] == "SEALING"
+
+
 def test_two_rescans_of_one_delivery_cannot_both_run(make_lab):
     lab, delivery = failed_scan(make_lab)
     blocking = BlockingScanner()

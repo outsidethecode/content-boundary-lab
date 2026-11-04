@@ -14,6 +14,7 @@ They cannot show that a cited test shows what its row says it does; that is for 
 documents point at has gone away.
 """
 
+import argparse
 import ast
 import json
 import re
@@ -23,7 +24,7 @@ import pytest
 from support.http_lab import make_lab
 from support.scanners import CountingScanner
 
-from content_boundary_lab import audit, scanner, store
+from content_boundary_lab import audit, runner, scanner, store
 
 ROOT = Path(__file__).resolve().parents[1]
 DOCS = [ROOT / "docs" / name for name in ("architecture.md", "threat-model.md", "references.md", "claims.md")]
@@ -199,6 +200,14 @@ def test_the_route_table_in_the_architecture_is_the_set_of_routes_the_applicatio
     section = text(ARCHITECTURE).split("## 4.")[1].split("## 5.")[0]
     documented = set(re.findall(r"\| `([A-Z]+) (/[^`]*)`", section))
     assert documented == served and len(served) == 9
+
+
+def test_the_commands_in_the_architecture_are_the_commands_the_runner_has():
+    section = text(ARCHITECTURE).split("## 14.")[1]
+    documented = set(re.findall(r"^\| `([a-z-]+)` \|", section, re.MULTILINE))
+    # The parser is the list of commands; it is reached through its private builder on purpose, as there is no other list.
+    commands = next(a for a in runner._parser()._actions if isinstance(a, argparse._SubParsersAction)).choices
+    assert documented == set(commands) and len(documented) == 6
 
 
 def test_every_audit_event_the_architecture_names_is_in_the_audit_vocabulary():

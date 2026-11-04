@@ -276,6 +276,13 @@ def test_duplicate_identities_are_rejected(conn, clock):
     store.add_subject(conn, clock, "https://other-idp.example", "vendor-1", "Vendor One")  # control: other issuer
 
 
+def test_has_productions_says_whether_any_production_exists_and_changes_nothing(conn, clock):
+    assert store.has_productions(conn) is False
+    store.add_production(conn, clock, "ALPHA (synthetic)")
+    assert store.has_productions(conn) is True
+    assert _scalar(conn, "SELECT COUNT(*) FROM productions") == 1  # asking did not add one
+
+
 def test_one_engagement_per_subject_and_production(conn, clock):
     world = _world(conn, clock)
     with pytest.raises(sqlite3.IntegrityError, match="UNIQUE"):

@@ -7,6 +7,8 @@
 #          python -m pip install --no-deps -e .
 # Generated 2026-11-03 from `pip install --dry-run --report` (pip 25.2). cffi, cryptography, pycparser and
 # PyJWT were added the same day for M1E-0; the other 19 entries are unchanged. See docs/decisions.md AM-9, AM-14.
+# uvicorn (minimal, not the standard extra) and its one new dependency click were added 2026-11-04 for M1M (V11, AM-27):
+# both are pure-Python py3-none-any wheels, hashes checked against the downloaded files; the other 23 entries are unchanged.
 # runtime
 annotated-doc==0.0.4 \
     --hash=sha256:571ac1dc6991c450b25a9c2d84a3705e2ae7a53467b5d111c24fa8baabbed320
@@ -19,13 +21,16 @@ anyio==4.14.2 \
 # runtime
 cffi==2.1.1 \
     --hash=sha256:19ee6127ee34de7d83ce3d371ebc5ed91addbdcc39f9ab15ce4eb35a4e534971
+# runtime (uvicorn)
+click==8.5.0 \
+    --hash=sha256:255bc9599cf7748b4b1a446ccc735421bd08a2ae529a8b88597d3de5664ee360
 # runtime
 cryptography==50.0.2 \
     --hash=sha256:fa8f5efb344d6908a1ce62f4a24e2e5780f825d6f53f5f50ec5ffacac72936cb
 # runtime
 fastapi==0.141.1 \
     --hash=sha256:bfb91aa2d334c61cb35ba9a116fc123b3d3df31640b801cf57a7a78ec3f603b3
-# dev/test only
+# runtime (uvicorn), and the test client
 h11==0.16.0 \
     --hash=sha256:63cf8bbe7522de3bf65932fda1d9c2772064ffb3dae62d55932da54b31cb6c86
 # dev/test only
@@ -76,3 +81,6 @@ typing_extensions==4.16.0 \
 # runtime
 typing-inspection==0.4.2 \
     --hash=sha256:4ed1cacbdc298c220f1bd249ed5287caa16f34d44ef4e9c3d0cbad5b521545e7
+# runtime
+uvicorn==0.54.0 \
+    --hash=sha256:505bdb0f318731d45f1f712071fc781a8981f6847a31c902c9f5e652d4f67faf
