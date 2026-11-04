@@ -27,9 +27,12 @@ from support.scanners import CountingScanner
 from content_boundary_lab import audit, runner, scanner, store
 
 ROOT = Path(__file__).resolve().parents[1]
-DOCS = [ROOT / "docs" / name for name in ("architecture.md", "threat-model.md", "references.md", "claims.md")]
+FINDING_PAGES = sorted((ROOT / "docs" / "findings").glob("F-*.md"))  # M2: one page per seeded finding
+EVIDENCE = sorted((ROOT / "docs" / "evidence").glob("f*.txt"))
+LABS_README = ROOT / "labs" / "README.md"
+DOCS = [ROOT / "docs" / name for name in ("architecture.md", "threat-model.md", "references.md", "claims.md")] + FINDING_PAGES
 README = ROOT / "README.md"
-PAGES = [README, *DOCS]
+PAGES = [README, LABS_README, *DOCS]
 THREAT_MODEL = ROOT / "docs" / "threat-model.md"
 CLAIMS = ROOT / "docs" / "claims.md"
 ARCHITECTURE = ROOT / "docs" / "architecture.md"
@@ -219,6 +222,71 @@ def test_every_system_actor_the_architecture_names_exists():
     page = text(ARCHITECTURE)
     for actor in audit.SYSTEM_ACTORS:
         assert f"`{actor.issuer}` / `{actor.subject}`" in page or f"`{actor.subject}`" in page
+
+
+# --- the findings (M2) ---------------------------------------------------------------------------------------------------------
+
+HEADINGS = (
+    "Context",
+    "Boundary",
+    "Vulnerable code and root cause",
+    "Exploitation scenario",
+    "Corrected code",
+    "Before and after results",
+    "Residual risk and assumptions",
+)
+FIXED_SENTENCE = "Every vulnerability here is deliberately constructed for education; none is a discovery in any third-party system."
+
+
+def test_there_is_one_page_and_one_evidence_file_for_each_of_the_four_findings():
+    assert [page.name.split("-")[1] for page in FINDING_PAGES] == ["02", "03", "04", "06"]
+    assert [path.name for path in EVIDENCE] == ["f02.txt", "f03.txt", "f04.txt", "f06.txt"]
+
+
+@pytest.mark.parametrize("page", FINDING_PAGES, ids=lambda page: page.name[:4])
+def test_a_finding_page_has_the_seven_headings_in_order_and_the_fixed_sentence(page):
+    body = text(page)
+    found = re.findall(r"^## \d\. (.+)$", body, re.MULTILINE)
+    assert tuple(found) == HEADINGS
+    assert FIXED_SENTENCE in body
+
+
+@pytest.mark.parametrize("page", FINDING_PAGES, ids=lambda page: page.name[:4])
+def test_a_finding_page_names_a_command_and_an_evidence_file_that_exist(page):
+    body = text(page)
+    command = re.search(r"`python -m (labs\.f\d\d_\w+)`", body)
+    assert command and (ROOT / command.group(1).replace(".", "/") / "__main__.py").is_file()
+    evidence = re.search(r"\]\(\.\./evidence/(f\d\d\.txt)\)", body)
+    assert evidence and (ROOT / "docs" / "evidence" / evidence.group(1)).is_file()
+    seam = re.search(r"\| Seam \| `([\w.]+)`", body).group(1)
+    module, _, name = seam.partition(".")
+    assert re.search(rf"^def {name}\(", text(ROOT / "src" / "content_boundary_lab" / f"{module}.py"), re.MULTILINE)  # the seam really is there
+
+
+@pytest.mark.parametrize("page", FINDING_PAGES, ids=lambda page: page.name[:4])
+def test_the_results_in_a_finding_page_are_lines_of_its_evidence_file(page):
+    evidence_name = re.search(r"\]\(\.\./evidence/(f\d\d\.txt)\)", text(page)).group(1)
+    evidence = {line for line in text(ROOT / "docs" / "evidence" / evidence_name).splitlines()}
+    results = text(page).split("## 6. Before and after results")[1].split("## 7.")[0]
+    block = results.split("```text")[1].split("```")[0]
+    quoted = [line for line in block.splitlines() if line.strip() and line != "…"]
+    assert len(quoted) >= 8 and [line for line in quoted if line not in evidence] == []
+
+
+@pytest.mark.parametrize("path", EVIDENCE, ids=lambda path: path.name)
+def test_an_evidence_file_records_when_how_and_on_what_it_was_made_and_ends_with_the_result(path):
+    body = text(path)
+    for field in ("date     ", "command  ", "commit   ", "python   ", "pinned   ", "status   PROVISIONAL", "note     "):
+        assert re.search(rf"^{field}", body, re.MULTILINE), field
+    assert "pinned   fastapi==" in body and FIXED_SENTENCE in body
+    assert body.rstrip().endswith("RESULT     seeded variant exploited: YES   reference blocked: YES")
+
+
+def test_the_labs_readme_lists_exactly_the_labs_that_exist_each_with_its_write_up():
+    present = sorted(path.parent.name for path in (ROOT / "labs").glob("f*/vulnerable.py"))
+    listed = sorted(re.findall(r"\[(f\d\d_\w+)\]\(\1/vulnerable\.py\)", text(LABS_README)))
+    assert present == listed and len(present) == 4
+    assert "intentionally vulnerable code. The default application does not." in text(LABS_README)
 
 
 # --- the vocabulary ------------------------------------------------------------------------------------------------------------

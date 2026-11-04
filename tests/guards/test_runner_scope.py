@@ -228,7 +228,7 @@ def test_no_test_imports_uvicorn_and_none_uses_a_socket_except_to_refuse_the_net
     settings loader run, which is how they show those make no network call. That is the only use allowed.
     """
     offenders = []
-    for path in sorted((ROOT / "tests").rglob("*.py")):
+    for path in sorted([*(ROOT / "tests").rglob("*.py"), *(ROOT / "labs").rglob("*.py")]):  # labs/ and tests/ alike (§5.5 item 7)
         source = path.read_text()
         offenders += [f"{path.relative_to(ROOT)}:{line} imports uvicorn" for line, *_ in imports_of(source, {"uvicorn"})]
         if imports_of(source, {"socket"}):

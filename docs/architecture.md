@@ -221,17 +221,32 @@ anyone who can write the database file can change rows and put the triggers back
 
 ## 10. The seams
 
-M0 isolates each finding in one function that a vulnerable variant would replace. The variants are not built; this table
-records where the reference decision is made, and where the name in the Addendum differs from the function in the code.
+M0 isolates each finding in one function that a vulnerable variant replaces. Since M2 the four core variants exist, in
+[labs/](../labs/README.md) and nowhere else. This table records where the reference decision is made, where the seeded twin
+lives, and where the name in the Addendum differs from the function in the code.
 
-| Finding | Addendum name | Where the reference decides | Note |
-|---|---|---|---|
-| F-02 | `get_asset_in_scope` | `assets.get_asset_in_scope` | as named |
-| F-03 | `content_identity` | `trust.content_identity` | as named |
-| F-04 | `copy_verified` | `promotion.copy_verified` | as named; the comparison with the accepted digest is in this function only (the recovery pass has its own, for a file that is already at the key) |
-| F-06 | `active_engagement` | `authz.authorize_engagement` (its engagement lookup) | no function of the Addendum's name exists; M2 chooses the seam |
-| F-01 (optional) | `authenticate` | `identity.authenticate` | as named; not built as a variant |
-| F-05 (optional) | `storage_key_for` | the server-made key in `store.add_delivery`, checked by `quarantine` and `assets` | no function of the Addendum's name exists; M2 chooses the seam |
+| Finding | Addendum name | Where the reference decides | Seeded twin (under `labs/`) | Note |
+|---|---|---|---|---|
+| F-02 | `get_asset_in_scope` | `assets.get_asset_in_scope` | [f02_parent_check](../labs/f02_parent_check/vulnerable.py) | as named |
+| F-03 | `content_identity` | `trust.content_identity` | [f03_declared_identity](../labs/f03_declared_identity/vulnerable.py) | as named |
+| F-04 | `copy_verified` | `promotion.copy_verified` | [f04_unverified_promotion](../labs/f04_unverified_promotion/vulnerable.py) | as named; the comparison with the accepted digest is in this function only (the recovery pass has its own, for a file that is already at the key) |
+| F-06 | `active_engagement` | `authz.authorize_engagement` | [f06_stale_authorisation](../labs/f06_stale_authorisation/vulnerable.py) | no function of the Addendum's name exists, and none was added: the decision boundary every route reaches is `authorize_engagement` |
+| F-01 (optional) | `authenticate` | `identity.authenticate` | not built | as named |
+| F-05 (optional) | `storage_key_for` | the server-made key in `store.add_delivery`, checked by `quarantine` and `assets` | not built | no function of the Addendum's name exists |
+
+**How a twin is put in place.** The reference has no seam to plug into: `Dependencies` holds no function that selects an
+implementation, and adding one would be the switch M0 forbids. A finding is instead a `labs.seam.Seam` (the reference
+function and its twin) and `labs.seam.applied(seam)`, which replaces that one attribute of that one reference module for the
+length of a `with` block in a test or a demonstration and puts the reference back when the block ends, however it ends. Calls
+inside the reference reach the function through its module at the time of the call, so the swap takes effect and nothing else
+moves (`moved()` compares every module-level name of the package inside and outside the block; the isolation tests require
+exactly one). The runner, the dependencies it builds and every option and setting are untouched; the default application
+cannot load a twin (shown in a separate `python -I` process, with a control).
+
+The one piece of plumbing is [labs/carrier.py](../labs/carrier.py), for F-06 only: the reference keeps just the issuer and
+subject of a verified token, so a twin that authorises from claims needs somewhere to read them, and the wrapper copies the
+bearer token's payload into a context variable for one request. It verifies nothing and decides nothing, and it wraps the lab's
+application in both variants.
 
 ## 11. Implemented, simulated, conceptual
 
@@ -240,7 +255,7 @@ records where the reference decision is made, and where the name in the Addendum
 | Implemented | token verification; engagement authorisation; the scoped asset read; the delivery workflow from declaration to promotion; the verdict cache and the hash-bound trust gate; the audit trail; the recovery passes (rescan, promotion reconcile) |
 | Simulated | the identity provider (a development token issuer under `tools/`, and an in-memory one under `tests/`); the scanner (one synthetic marker); the object stores (two local directories) |
 | Conceptual | cloud buckets, pre-signed URLs, OIDC federation, CSAP's separate components |
-| Not built | recovery of a delivery stranded in `SEALING` (an operator investigates; A-J7); the vulnerable variants, their exploits and the finding write-ups (M2); the optional F-01 and F-05 variants |
+| Not built | recovery of a delivery stranded in `SEALING` (an operator investigates; A-J7); the optional F-01 and F-05 variants; the fix-evidence matrices and the bypass corpora for the naive fixes (M3) |
 
 ## 12. CSAP analogy and cloud mapping
 

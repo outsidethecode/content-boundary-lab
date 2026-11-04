@@ -1,0 +1,57 @@
+date     2026-11-04T19:13:17Z
+command  python -m labs.f03_declared_identity --evidence docs/evidence/f03.txt
+commit   e75ee95 plus an uncommitted working tree
+python   3.13.7 on Darwin arm64
+pinned   fastapi==0.141.1, starlette==1.3.1, PyJWT==2.15.1, cryptography==50.0.2, httpx2==2.13.1
+status   PROVISIONAL: regenerated against the final committed tree at M5 (docs/decisions.md, AM-28)
+note     Every vulnerability here is deliberately constructed for education; none is a discovery in any third-party system.
+         Synthetic identities, content and keys only. The scanner is the lab's synthetic marker scanner and provides
+         no malware protection. A passing run shows the seeded defect is reproducible and the reference blocks it
+         under the stated assumptions; it shows nothing about any other system.
+
+F-03  Caller-declared checksum used as content identity
+seam       content_boundary_lab.trust.content_identity
+twin       labs.f03_declared_identity.vulnerable.content_identity
+scenario   a marker file is declared with the SHA-256 of a clean file whose verdict is already cached
+
+== REFERENCE
+  1. a clean file is delivered and sealed in the ordinary way: the scanner is asked and its verdict cached
+       -> 200 SCAN_PASSED, scanner calls: 1
+  2. a marker file with an allowed signature is delivered, declared with the CLEAN file's SHA-256 and its own size
+       -> upload accepted, 935 bytes, declared sha256 b75f1f348b4f…
+  3. the vendor seals it
+       -> 422 REJECTED (checksum_mismatch)
+  4. scanner calls made for that seal
+       -> 0
+  5. what the server holds as the sealed digest of the delivery
+       -> 1629f3591a5f… (the digest of the stored bytes)
+  6. what the stored bytes actually hash to
+       -> 1629f3591a5f… (the marker file: True); the lab marker is in the stored bytes: True
+  7. audit events about that delivery
+       -> delivery.initiated, delivery.upload_started, delivery.uploaded, delivery.seal_started, delivery.rejected (checksum_mismatch)
+  8. the coordinator inspects it
+       -> 200 REJECTED
+  9. control: the same marker file declared truthfully is scanned and rejected
+       -> 422 detection, scanner calls so far: 2
+
+== SEEDED VARIANT (only the seam above is swapped)
+  1. a clean file is delivered and sealed in the ordinary way: the scanner is asked and its verdict cached
+       -> 200 SCAN_PASSED, scanner calls: 1
+  2. a marker file with an allowed signature is delivered, declared with the CLEAN file's SHA-256 and its own size
+       -> upload accepted, 935 bytes, declared sha256 b75f1f348b4f…
+  3. the vendor seals it
+       -> 200 SCAN_PASSED
+  4. scanner calls made for that seal
+       -> 0
+  5. what the server holds as the sealed digest of the delivery
+       -> b75f1f348b4f… (the declared clean digest)
+  6. what the stored bytes actually hash to
+       -> 1629f3591a5f… (the marker file: True); the lab marker is in the stored bytes: True
+  7. audit events about that delivery
+       -> delivery.initiated, delivery.upload_started, delivery.uploaded, delivery.seal_started, delivery.verdict_reused
+  8. the coordinator inspects it
+       -> 200 SCAN_PASSED
+  9. control: the same marker file declared truthfully is scanned and rejected
+       -> 422 detection, scanner calls so far: 2
+
+RESULT     seeded variant exploited: YES   reference blocked: YES

@@ -1,0 +1,8 @@
+# What the source distribution leaves out. setuptools adds tests/test*.py to an sdist by default; none of these directories is
+# part of the reference package, and labs/ is intentionally vulnerable (tests/test_packaging.py shows the result).
+prune labs
+prune tests
+prune tools
+prune docs
+prune .dev
+global-exclude *.pem *.key *.sqlite3 *.db

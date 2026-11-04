@@ -43,6 +43,10 @@ Whether CWE-354 (Improper Validation of Integrity Check Value) is a better fit f
 | F-06 | Stale authorisation | TB3 | CWE-863 | 8.3.2, 7.4.2 |
 | F-01 | Identity taken from a header | TB1/TB2 | CWE-290 | 4.1.3, 8.3.1 |
 
+The four finding pages ([docs/findings](findings/F-02-object-access-checks-the-parent.md)) use these mappings as M0 gave them.
+M2 retrieved nothing new, so every retrieval date above is still 2026-11-03 and the rechecks (V5, V9, V10) are still open;
+in particular the choice of CWE-367 over CWE-354 for F-04, and the CWE-863 class for F-06, are M0's and not re-examined.
+
 Other requirements cited by the design: ASVS 5.2.1 and CWE-770 for the size cap enforced while streaming; 5.2.2 for the
 file-signature allowlist; 5.4.1 and 5.4.2 for the display name encoded on download; 9.1.1 to 9.1.3, 9.2.1 and 9.2.3 for
 token verification (pinned algorithm, trusted key source, `exp`, `nbf` and `aud`).

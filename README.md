@@ -5,9 +5,22 @@ It is not affiliated with, endorsed by or sponsored by any company, standards bo
 
 Every vulnerability here is deliberately constructed for education; none is a discovery in any third-party system.
 
-**Status: the reference implementation is built, composed by a runner, documented, and has been served by a real local `uvicorn` on `127.0.0.1`.** The workflow runs and is tested in-process, and an opt-in set of tests drives the real server over TCP on this one machine with synthetic data. There is no deliberately vulnerable variant and no security finding: those come later. The reference application contains no vulnerable code and no switch that selects any.
+**Status: the reference implementation is built, composed by a runner, documented, and has been served by a real local `uvicorn` on `127.0.0.1`.** The workflow runs and is tested in-process, and an opt-in set of tests drives the real server over TCP on this one machine with synthetic data. Four seeded findings are written and reproducible (below). `labs/` contains intentionally vulnerable code; the default application does not, and no switch, option or setting selects any of it.
 
 The code is organised around three decisions that real failures in this area tend to blur together: who you are (a verified signed token), what you may touch (an engagement looked up on every request, in the production the URL names), and whether the bytes should be trusted (decided from the bytes the server itself read and hashed, never from what the sender declared).
+
+## The findings
+
+Each finding is one function in the reference application and a seeded twin of it under [labs/](labs/README.md). The same attacker's steps run against the reference and against the reference with only that function swapped; the seeded variant is exploited and the reference refuses. Passing tests show that the seeded defect is reproducible and that the corrected code blocks it under the stated assumptions; they show nothing more.
+
+| Finding | Boundary | Severity (in-scenario, educational) | CWE | ASVS 5.0.0 | Write-up | Reproduce |
+|---|---|---|---|---|---|---|
+| F-02 Object access checks the parent, not the child | TB3 | High | 639 | 8.2.2, 8.4.1 | [F-02](docs/findings/F-02-object-access-checks-the-parent.md) | `python -m labs.f02_parent_check` |
+| F-03 Caller-declared checksum used as content identity | TB5 | High | 807 | 5.4.3, 2.2.2, 16.5.3 | [F-03](docs/findings/F-03-declared-checksum-used-as-content-identity.md) | `python -m labs.f03_declared_identity` |
+| F-04 Promotion trusts a mutable reference, not the accepted bytes | TB4 | High if something else can write quarantine after the seal | 367 | 15.4.2, 2.3.1, 2.3.3 | [F-04](docs/findings/F-04-promotion-trusts-a-mutable-reference.md) | `python -m labs.f04_unverified_promotion` |
+| F-06 Authorisation snapshot in a long-lived token | TB3 | Medium | 863 | 8.3.2, 7.4.2 | [F-06](docs/findings/F-06-authorisation-snapshot-in-a-long-lived-token.md) | `python -m labs.f06_stale_authorisation` |
+
+`python -m labs` runs all four and ends with `4 exploits reproduced against the seeded variants; 4 blocked by the reference (4 findings).` Output of each run, with the date, command, commit and versions, is in [docs/evidence](docs/evidence/f02.txt). `pytest tests/findings -v` runs the same scenarios as tests with the isolation proof; `pytest -m packaging` shows that neither the wheel nor the sdist holds anything from `labs/`. F-01 and F-05 are optional in the design and are not built. The scanner is the lab's synthetic marker scanner and provides no malware protection.
 
 ## Documentation
 

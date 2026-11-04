@@ -1,0 +1,61 @@
+date     2026-11-04T19:13:16Z
+command  python -m labs.f02_parent_check --evidence docs/evidence/f02.txt
+commit   e75ee95 plus an uncommitted working tree
+python   3.13.7 on Darwin arm64
+pinned   fastapi==0.141.1, starlette==1.3.1, PyJWT==2.15.1, cryptography==50.0.2, httpx2==2.13.1
+status   PROVISIONAL: regenerated against the final committed tree at M5 (docs/decisions.md, AM-28)
+note     Every vulnerability here is deliberately constructed for education; none is a discovery in any third-party system.
+         Synthetic identities, content and keys only. The scanner is the lab's synthetic marker scanner and provides
+         no malware protection. A passing run shows the seeded defect is reproducible and the reference blocks it
+         under the stated assumptions; it shows nothing about any other system.
+
+F-02  Object access checks the parent, not the child
+seam       content_boundary_lab.assets.get_asset_in_scope
+twin       labs.f02_parent_check.vulnerable.get_asset_in_scope
+scenario   a vendor engaged only in ALPHA asks for a BRAVO asset through the ALPHA url
+
+== REFERENCE
+  1. an ALPHA vendor reads ALPHA's own asset through the ALPHA url (control)
+       -> 200, 4500 bytes: exactly ALPHA's asset
+  2. the same vendor asks for BRAVO's asset through the ALPHA url
+       -> 404 {"detail":"Not found"}
+  3. what the audit trail recorded for that request
+       -> access.denied denied (not_found_or_forbidden), production ALPHA, object BRAVO asset
+  4. the same vendor asks for an asset id that does not exist
+       -> 404 {"detail":"Not found"}
+  5. is the refusal the same as for a missing asset?
+       -> True
+  6. the same vendor asks for BRAVO's asset through the BRAVO url (not engaged there)
+       -> 403 {"detail":"Forbidden"}
+  7. a vendor engaged in BOTH asks for BRAVO's asset through the ALPHA url
+       -> 404 {"detail":"Not found"}
+  8. the same vendor asks for it through the BRAVO url (control)
+       -> 200, 3500 bytes: exactly BRAVO's asset
+  9. an ALPHA coordinator asks for BRAVO's asset through the ALPHA url
+       -> 404 {"detail":"Not found"}
+  10. no token at all, the same url
+       -> 401 {"detail":"Not authenticated"}
+
+== SEEDED VARIANT (only the seam above is swapped)
+  1. an ALPHA vendor reads ALPHA's own asset through the ALPHA url (control)
+       -> 200, 4500 bytes: exactly ALPHA's asset
+  2. the same vendor asks for BRAVO's asset through the ALPHA url
+       -> 200, 3500 bytes: exactly BRAVO's asset
+  3. what the audit trail recorded for that request
+       -> asset.read allowed, production ALPHA, object BRAVO asset
+  4. the same vendor asks for an asset id that does not exist
+       -> 404 {"detail":"Not found"}
+  5. is the refusal the same as for a missing asset?
+       -> False
+  6. the same vendor asks for BRAVO's asset through the BRAVO url (not engaged there)
+       -> 403 {"detail":"Forbidden"}
+  7. a vendor engaged in BOTH asks for BRAVO's asset through the ALPHA url
+       -> 200, 3500 bytes: exactly BRAVO's asset
+  8. the same vendor asks for it through the BRAVO url (control)
+       -> 200, 3500 bytes: exactly BRAVO's asset
+  9. an ALPHA coordinator asks for BRAVO's asset through the ALPHA url
+       -> 200, 3500 bytes: exactly BRAVO's asset
+  10. no token at all, the same url
+       -> 401 {"detail":"Not authenticated"}
+
+RESULT     seeded variant exploited: YES   reference blocked: YES
