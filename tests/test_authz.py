@@ -29,6 +29,7 @@ ISSUER = tokens.ISSUER
 OTHER_ISSUER = "https://other-issuer.example"
 KEY = tokens.new_key("key-1")
 VIEW, MANAGE = Action.VIEW_OWN_ENGAGEMENT, Action.MANAGE_ENGAGEMENTS
+READ_ASSET = Action.READ_ASSET
 REVOKED, EXPIRED = AuditReason.ENGAGEMENT_REVOKED, AuditReason.ENGAGEMENT_EXPIRED
 NO_ENGAGEMENT, NOT_PERMITTED = AuditReason.NO_ENGAGEMENT, AuditReason.ROLE_NOT_PERMITTED
 INVALID_IDENTIFIER = AuditReason.INVALID_IDENTIFIER
@@ -122,8 +123,8 @@ def _revoke(conn, engagement_id, seconds=60):
 
 
 def test_the_policy_is_small_closed_and_read_only():
-    assert set(Action) == {VIEW, MANAGE}
-    assert dict(authz.POLICY) == {"coordinator": {VIEW, MANAGE}, "vendor": {VIEW}}
+    assert set(Action) == {VIEW, MANAGE, READ_ASSET}
+    assert dict(authz.POLICY) == {"coordinator": {VIEW, MANAGE, READ_ASSET}, "vendor": {VIEW, READ_ASSET}}
     assert isinstance(authz.POLICY, MappingProxyType)
     with pytest.raises(TypeError):
         authz.POLICY["vendor"] = frozenset(Action)
@@ -136,10 +137,19 @@ def test_the_policy_is_small_closed_and_read_only():
         ("coordinator-1", "coordinator", MANAGE, True),
         ("vendor-1", "vendor", VIEW, True),
         ("vendor-1", "vendor", MANAGE, False),
+        ("coordinator-1", "coordinator", READ_ASSET, True),
+        ("vendor-1", "vendor", READ_ASSET, True),
     ],
-    ids=["coordinator views", "coordinator manages", "vendor views", "vendor may not manage"],
+    ids=[
+        "coordinator views",
+        "coordinator manages",
+        "vendor views",
+        "vendor may not manage",
+        "coordinator reads assets",
+        "vendor reads assets",
+    ],
 )
-def test_the_role_policy_is_enforced_for_both_actions(conn, subject, role, action, permitted):
+def test_the_role_policy_is_enforced_for_every_action(conn, subject, role, action, permitted):
     world = _world(conn)
     if permitted:
         assert _decide(conn, _who(subject), world.alpha, action).role == role

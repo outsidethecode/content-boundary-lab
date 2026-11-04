@@ -45,17 +45,38 @@ unmatched path, a method the route does not accept and any other answer the fram
 Failure. If the audit insert, the commit or anything else fails, the transaction is rolled back and the answer is a
 generic 500 (the error is logged here, not returned): a decision that could not be recorded is not delivered. A database
 that cannot be opened cannot record anything either, and this module does not pretend otherwise.
+
+Downloads. An operation may return a Decision that carries a Download: a file it has already opened, its size and the
+stored display name. The bytes are not read inside the transaction. The flow commits first and only then builds a
+DownloadResponse, so a slow client never holds the writer lock, and it sets every header itself (the operation cannot):
+application/octet-stream, nosniff, no-store, a Content-Length from the opened file and a Content-Disposition whose
+filename comes from the display name through safe_download_filename. Failures are divided by the commit:
+
+    before it   a failure in the operation's own steps, the audit count, or the commit rolls back, closes the file and
+                answers a generic error; no event is committed
+    after it    the committed event stays, whatever then happens to the connection; the response closes the file in a
+                `finally` around the whole ASGI call (so also if the client is gone before the first byte, or the call
+                is cancelled), and once headers are out no replacement response is attempted
+
+Ownership: an operation closes a file it opened if it fails before returning the Decision; from the return the flow owns
+it. `asset.read / allowed` therefore means that the caller was authorised, the file was opened and the server committed
+to serve it. It is not evidence that any byte arrived, and there is no completion event. A response already authorised is
+not cut off when authorisation is later withdrawn: only requests that begin after the revocation commit are refused.
 """
 
 import logging
+import re
 import sqlite3
-from collections.abc import Callable
+import unicodedata
+from collections.abc import Callable, Iterator
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
+from typing import BinaryIO
+from urllib.parse import quote
 
 from fastapi import Request
-from fastapi.responses import JSONResponse, Response
+from fastapi.responses import JSONResponse, Response, StreamingResponse
 
 from content_boundary_lab import audit, authz, identity, store
 from content_boundary_lab.clock import Clock, from_micros, to_micros
@@ -64,6 +85,10 @@ from content_boundary_lab.settings import TrustedSettings
 logger = logging.getLogger(__name__)
 
 MAX_BODY_BYTES = 4096
+DOWNLOAD_CHUNK = 64 * 1024
+MAX_FILENAME_LENGTH = 100
+_UNSAFE_FILENAME_CHARACTERS = frozenset('<>:"/\\|?*%;')  # path separators, Windows-reserved, and header/encoding syntax
+_RESERVED_DEVICE_NAME = re.compile(r"(con|prn|aux|nul|com[1-9]|lpt[1-9])(\..*)?", re.IGNORECASE)
 _LOCK_CODES = frozenset({sqlite3.SQLITE_BUSY, sqlite3.SQLITE_LOCKED})
 _PRIMARY_CODE_MASK = 0xFF  # an extended SQLite result code keeps its primary code in the low byte
 
@@ -85,12 +110,36 @@ class _Snapshot:
 
 
 @dataclass(frozen=True)
+class Download:
+    """A file to stream once the transaction has committed. It is open, positioned at 0, and owned by whoever holds this.
+
+    `size` is the length of the file as reported by the opened descriptor (fstat), which becomes the Content-Length;
+    `filename` is the stored display name, from which the flow derives the download name. close() is idempotent.
+    """
+
+    file: BinaryIO
+    size: int
+    filename: str
+
+    def close(self) -> None:
+        self.file.close()
+
+
+@dataclass(frozen=True)
 class Decision:
-    """What the request decided, held until its transaction has committed."""
+    """What the request decided, held until its transaction has committed.
+
+    A download is a 200 with no JSON content and no headers of its own: the flow sets them all.
+    """
 
     status: int
     content: dict[str, str]
     headers: dict[str, str] | None = None
+    download: Download | None = None
+
+    def __post_init__(self) -> None:
+        if self.download is not None and (self.status != 200 or self.content or self.headers):
+            raise ValueError("a download is a plain 200 with no content and no headers of its own")
 
 
 @dataclass(frozen=True)
@@ -147,6 +196,10 @@ def _forbidden() -> Decision:
     return Decision(403, {"detail": "Forbidden"})
 
 
+def _not_found() -> Decision:
+    return Decision(404, {"detail": "Not found"})
+
+
 def _server_error() -> Decision:
     return Decision(500, {"detail": "Internal server error"})
 
@@ -182,6 +235,22 @@ def _authorize(conn: sqlite3.Connection, caller, production_id: str, action: aut
         return denied.reason
 
 
+def _record_denial(
+    ctx: Context, reason: audit.AuditReason, object_type: audit.ObjectType | None, object_id: str | None
+) -> None:
+    audit.record_event(
+        ctx.conn,
+        ctx.clock,
+        audit.AuditAction.ACCESS_DENIED,
+        audit.Outcome.DENIED,
+        actor=ctx.caller.as_actor(),
+        production_id=ctx.production_id,
+        object_type=object_type,
+        object_id=object_id,
+        reason=reason,
+    )
+
+
 def deny(
     ctx: Context,
     reason: audit.AuditReason,
@@ -194,18 +263,25 @@ def deny(
     For an operation whose target is not in the caller's production, or does not exist, or is malformed: the answer is the
     same whichever it is, and the reason (a closed code) is for the audit record only. object_id must be a validated id.
     """
-    audit.record_event(
-        ctx.conn,
-        ctx.clock,
-        audit.AuditAction.ACCESS_DENIED,
-        audit.Outcome.DENIED,
-        actor=ctx.caller.as_actor(),
-        production_id=ctx.production_id,
-        object_type=object_type,
-        object_id=object_id,
-        reason=reason,
-    )
+    _record_denial(ctx, reason, object_type, object_id)
     return _forbidden()
+
+
+def not_found(
+    ctx: Context,
+    reason: audit.AuditReason,
+    *,
+    object_type: audit.ObjectType | None = None,
+    object_id: str | None = None,
+) -> Decision:
+    """The generic 404 for an object the caller cannot reach, recorded as access.denied in the request's transaction.
+
+    The answer for an object that does not exist, is in another production, or is malformed is one and the same, so a
+    caller cannot learn which objects exist; the reason is for the audit record only. A caller who is refused for the
+    production itself never gets here: that is the 403 of the flow, whatever object was named.
+    """
+    _record_denial(ctx, reason, object_type, object_id)
+    return _not_found()
 
 
 def _decide(
@@ -269,6 +345,7 @@ def _run(
     body: RequestBody | None,
 ) -> Decision:
     conn = store.connect(database_path)
+    decision: Decision | None = None
     try:
         with store.transaction(conn):
             moment = clock.now()  # the only clock read of the request, made while holding the writer lock
@@ -280,6 +357,10 @@ def _run(
             )
             _check_one_audit_event(conn, baseline)  # before the commit: a miscount rolls everything back
         return decision  # the transaction has committed
+    except BaseException:
+        if decision is not None and decision.download is not None:
+            decision.download.close()  # before the commit nothing is served, so the flow gives the file back
+        raise
     finally:
         conn.close()
 
@@ -292,6 +373,80 @@ def _failed(error: Exception) -> Decision:
         return _unavailable()
     logger.error("engagement request failed; nothing was decided", exc_info=error)
     return _server_error()
+
+
+def safe_download_filename(display_name: str) -> str:
+    """A name fit to offer a client, derived from a stored display name that is metadata and nothing else.
+
+    Controls (C0, C1, DEL, NUL, CR, LF), format characters (which include the bidirectional controls and the zero-width
+    joiners), unassigned, private-use and surrogate code points, line and paragraph separators, path separators, the
+    characters Windows reserves, quotes, semicolons and percent signs are replaced by an underscore; other space
+    characters become a plain space. Leading and trailing dots and spaces are removed (no hidden file, no `..`, no
+    trailing dot), a Windows device name gets a leading underscore, the length is bounded with a short extension kept, and
+    a name with nothing left is `download`. The result is never empty and never contains a character that could change
+    the syntax of the header it goes into.
+    """
+    replaced = []
+    for char in display_name:
+        category = unicodedata.category(char)
+        if char in _UNSAFE_FILENAME_CHARACTERS or category[0] == "C" or category in {"Zl", "Zp"}:
+            replaced.append("_")
+        elif category == "Zs":
+            replaced.append(" ")
+        else:
+            replaced.append(char)
+    name = "".join(replaced).strip(" .")
+    if len(name) > MAX_FILENAME_LENGTH:
+        stem, dot, extension = name.rpartition(".")
+        if dot and 0 < len(extension) <= 10:
+            name = stem[: MAX_FILENAME_LENGTH - len(extension) - 1] + "." + extension
+        else:
+            name = name[:MAX_FILENAME_LENGTH]
+        name = name.strip(" .")
+    if not name or set(name) == {"_"}:
+        return "download"
+    return "_" + name if _RESERVED_DEVICE_NAME.fullmatch(name) else name
+
+
+def content_disposition(display_name: str) -> str:
+    """`attachment` with an ASCII `filename` and a UTF-8 `filename*`, both made from the one sanitised name."""
+    name = safe_download_filename(display_name)
+    fallback = "".join(char if char.isascii() else "_" for char in name)
+    return f"attachment; filename=\"{fallback}\"; filename*=UTF-8''{quote(name, safe='')}"
+
+
+def _chunks(download: Download) -> Iterator[bytes]:
+    """The file in chunks, exactly `size` bytes. A file that ends early raises: the headers are already out."""
+    remaining = download.size
+    while remaining > 0:
+        block = download.file.read(min(DOWNLOAD_CHUNK, remaining))
+        if not block:
+            raise OSError("the file ended before its declared size")
+        remaining -= len(block)
+        yield block
+
+
+class DownloadResponse(StreamingResponse):
+    """A committed download. It owns the file and closes it however the ASGI call ends."""
+
+    def __init__(self, download: Download) -> None:
+        headers = {
+            "Content-Type": "application/octet-stream",
+            "X-Content-Type-Options": "nosniff",
+            "Cache-Control": "no-store",
+            "Content-Disposition": content_disposition(download.filename),
+            "Content-Length": str(download.size),
+        }
+        super().__init__(_chunks(download), status_code=200, headers=headers)
+        self._download = download
+
+    async def __call__(self, scope, receive, send) -> None:
+        # A `finally` around the whole call, not a generator's own cleanup: that does not run if the stream never starts
+        # (the client is gone before the first byte) or if the call is cancelled before the body is first awaited.
+        try:
+            await super().__call__(scope, receive, send)
+        finally:
+            self._download.close()
 
 
 def handle(
@@ -310,6 +465,12 @@ def handle(
         decision = _run(settings, clock, database_path, production_id, authorization, action, operation, body)
     except Exception as error:  # fail closed: whatever went wrong, no decision is delivered (and it is logged)
         decision = _failed(error)
+    if decision.download is not None:
+        try:
+            return DownloadResponse(decision.download)
+        except BaseException:
+            decision.download.close()  # the response never took ownership
+            raise
     # Every answer is personal to the caller, so none of them is to be stored by a cache.
     headers = {**(decision.headers or {}), "Cache-Control": "no-store"}
     return JSONResponse(decision.content, status_code=decision.status, headers=headers)
