@@ -20,6 +20,8 @@ TABLES = {"productions", "subjects", "engagements", "assets", "deliveries", "ver
 TRIGGERS = {
     "deliveries_seal_is_final",
     "deliveries_pass_needs_a_matching_verdict",
+    "deliveries_acceptance_needs_a_matching_verdict",
+    "deliveries_acceptance_is_final",
     "verdicts_are_not_replaced",
     "verdicts_are_kept",
     "verdicts_are_immutable",

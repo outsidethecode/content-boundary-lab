@@ -9,6 +9,7 @@ import sqlite3
 import unicodedata
 from dataclasses import dataclass
 from enum import StrEnum
+from types import MappingProxyType
 
 from content_boundary_lab.clock import Clock, to_micros
 from content_boundary_lab.store import StoreError
@@ -41,6 +42,11 @@ class AuditAction(StrEnum):
     DELIVERY_VERDICT_REUSED = "delivery.verdict_reused"  # SCAN_PASSED on a cached verdict for the same digest and scanner
     DELIVERY_REJECTED = "delivery.rejected"  # REJECTED: a mismatch, an unsupported type or a detection (the reason says which)
     DELIVERY_SCAN_FAILED = "delivery.scan_failed"  # SCAN_FAILED: the scanner could not give a verdict (the reason says why)
+    DELIVERY_VIEWED = "delivery.viewed"  # a coordinator inspected a delivery's sealing result
+    DELIVERY_ACCEPTED = "delivery.accepted"  # SCAN_PASSED -> ACCEPTED: a coordinator accepted the sealed digest
+    DELIVERY_ACCEPTANCE_REFUSED = "delivery.acceptance_refused"  # an authorised acceptance that the delivery or the request failed
+    DELIVERY_RESCAN_STARTED = "delivery.rescan_started"  # SCAN_FAILED or SCAN_PASSED -> SEALING, by the internal rescan
+    DELIVERY_INTEGRITY_FAILED = "delivery.integrity_failed"  # INTEGRITY_FAILED: the bytes no longer hash to the sealed digest
 
 
 class AuditReason(StrEnum):
@@ -64,6 +70,10 @@ class AuditReason(StrEnum):
     SCANNER_UNAVAILABLE = "scanner_unavailable"  # the scanner could not be used
     SCANNER_TIMEOUT = "scanner_timeout"  # the scanner did not answer in time
     SCANNER_BAD_RESPONSE = "scanner_bad_response"  # the scanner's reply was malformed or described other bytes
+    VERDICT_STALE = "verdict_stale"  # the verdict has expired, or is from an engine, version or policy no longer in use
+    VERDICT_NOT_APPLICABLE = "verdict_not_applicable"  # there is no no_detection verdict for the sealed digest to rely on
+    DIGEST_MISMATCH = "digest_mismatch"  # the digest a coordinator named is not the delivery's sealed digest
+    SEALED_CONTENT_CHANGED = "sealed_content_changed"  # the stored bytes no longer hash to the sealed digest and size
 
 
 class ObjectType(StrEnum):
@@ -92,15 +102,28 @@ class EngineKind(StrEnum):
 
 
 # engine.kind appears in every verdict-bearing audit event (Addendum §5.3). An event is verdict-bearing if it is about a
-# scanner's verdict, or about a scan that could not give one (then the kind is the configured scanner's). It is required
-# on those events and refused on every other, so the column is NULL everywhere else and is never free text.
+# scanner's verdict, or about a scan that could not give one (then the kind is the configured scanner's), or if it relies
+# on a verdict (an acceptance, and an acceptance refused because of the verdict). It is required on those events and
+# refused on every other, so the column is NULL everywhere else and is never free text. An inspection shows a verdict
+# when the delivery has one, so there the kind is allowed when a verdict is shown and not otherwise required.
 _KIND_REQUIRED_ACTIONS = frozenset(
-    {AuditAction.DELIVERY_SCAN_PASSED, AuditAction.DELIVERY_VERDICT_REUSED, AuditAction.DELIVERY_SCAN_FAILED}
+    {
+        AuditAction.DELIVERY_SCAN_PASSED,
+        AuditAction.DELIVERY_VERDICT_REUSED,
+        AuditAction.DELIVERY_SCAN_FAILED,
+        AuditAction.DELIVERY_ACCEPTED,
+    }
 )
-_KIND_REQUIRED_BY_REASON = {AuditAction.DELIVERY_REJECTED: frozenset({AuditReason.DETECTION})}
+_KIND_REQUIRED_BY_REASON = {
+    AuditAction.DELIVERY_REJECTED: frozenset({AuditReason.DETECTION}),
+    AuditAction.DELIVERY_ACCEPTANCE_REFUSED: frozenset({AuditReason.VERDICT_STALE, AuditReason.VERDICT_NOT_APPLICABLE}),
+}
+_KIND_OPTIONAL_ACTIONS = frozenset({AuditAction.DELIVERY_VIEWED})
 
 
 def _check_engine_kind(action: AuditAction, reason: AuditReason | None, engine_kind: EngineKind | None) -> None:
+    if action in _KIND_OPTIONAL_ACTIONS:
+        return
     required = action in _KIND_REQUIRED_ACTIONS or reason in _KIND_REQUIRED_BY_REASON.get(action, ())
     if required and engine_kind is None:
         raise ValueError("an event about a scanner verdict needs its engine_kind")
@@ -149,6 +172,40 @@ class Actor:
         _check_text("subject", self.subject, MAX_ACTOR_LENGTH)
 
 
+# The lab's own acts (an internal rescan, M1J) are neither a vendor's nor a coordinator's, so they are recorded under a
+# named identity that no verified token can carry: settings refuses a trusted issuer in this namespace, and this module
+# refuses the namespace to everyone but the named system actors, each for its own events only. It is a convention in the
+# audit trail and a bound on what may be recorded under it; it is not a credential and authenticates nothing.
+SYSTEM_ISSUER_PREFIX = "system:"
+SYSTEM_RESCAN = Actor("system:content-boundary-lab", "rescan")
+SYSTEM_ACTORS = frozenset({SYSTEM_RESCAN})
+_SYSTEM_ACTIONS = MappingProxyType(
+    {
+        SYSTEM_RESCAN: frozenset(
+            {
+                AuditAction.DELIVERY_RESCAN_STARTED,
+                AuditAction.DELIVERY_SCAN_PASSED,
+                AuditAction.DELIVERY_VERDICT_REUSED,
+                AuditAction.DELIVERY_REJECTED,
+                AuditAction.DELIVERY_SCAN_FAILED,
+                AuditAction.DELIVERY_INTEGRITY_FAILED,
+                AuditAction.DELIVERY_REQUEST_REJECTED,  # a rescan that was asked for and refused
+            }
+        )
+    }
+)
+
+
+def _check_system_actor(actor: Actor | None, action: AuditAction) -> None:
+    if actor is None or not actor.issuer.casefold().startswith(SYSTEM_ISSUER_PREFIX):
+        return
+    allowed = _SYSTEM_ACTIONS.get(actor)
+    if allowed is None:
+        raise ValueError("the system namespace belongs to the named system actors")
+    if action not in allowed:
+        raise ValueError("a system actor may record only the events of its own work")
+
+
 def _require_type(name: str, value: object, kind: type, *, optional: bool = False) -> None:
     if value is None and optional:
         return
@@ -193,7 +250,10 @@ def record_event(
     fails, the error propagates and the caller's transaction fails with it: there is no best-effort fallback.
 
     engine_kind is required on the events that are about a scanner verdict (a scan that passed, a verdict reused, a scan
-    that could not give a verdict, a detection) and refused on every other event; see _check_engine_kind.
+    that could not give a verdict, a detection, an acceptance, an acceptance refused because of the verdict) and refused on
+    every other event; an inspection may carry it. See _check_engine_kind.
+
+    An actor in the `system:` namespace must be one of SYSTEM_ACTORS and may record only that actor's own events.
 
     production_id and an object_id for a production, engagement or asset are 32 lowercase hexadecimal characters, as
     the store generates them; a subject's object_id is a canonical positive decimal integer; object_id needs an
@@ -208,6 +268,7 @@ def record_event(
     _require_type("engine_kind", engine_kind, EngineKind, optional=True)
     _check_production_id(production_id)
     _check_object_id(object_type, object_id)
+    _check_system_actor(actor, action)
     _check_engine_kind(action, reason, engine_kind)
     if not conn.in_transaction:
         raise StoreError("an audit event must be recorded inside the caller's transaction")

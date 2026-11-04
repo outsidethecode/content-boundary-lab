@@ -35,6 +35,8 @@ from types import MappingProxyType
 
 from cryptography.hazmat.primitives.asymmetric import ec
 
+from content_boundary_lab.audit import SYSTEM_ISSUER_PREFIX
+
 MAX_KEYS = 8
 MAX_SETTINGS_BYTES = 8192
 MAX_JWKS_BYTES = 16384
@@ -95,6 +97,9 @@ class TrustedSettings:
 
     def __post_init__(self) -> None:
         _check_text("issuer", self.issuer)
+        if self.issuer.casefold().startswith(SYSTEM_ISSUER_PREFIX):
+            # The audit trail records the lab's own work under this namespace; no token may be able to claim it.
+            raise ConfigurationError("issuer must not be in the namespace reserved for the lab's own system actors")
         _check_text("audience", self.audience)
         object.__setattr__(self, "public_keys", MappingProxyType(_validated_keys(self.public_keys)))
 

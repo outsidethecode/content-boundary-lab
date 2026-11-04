@@ -592,6 +592,28 @@ def test_the_settings_object_validates_issuer_and_audience(issuer, audience):
         TrustedSettings(issuer, audience, {"key-1": _new_public_key()})
 
 
+# The issuer namespace `system:` belongs to the lab's own internal actor (the rescan, M1J). No token issuer may have it,
+# so a token can never carry the identity under which the audit trail records the lab's own work.
+RESERVED_ISSUERS = ["system:content-boundary-lab", "system:", "system:x", "SYSTEM:content-boundary-lab", "System:Anything"]
+
+
+@pytest.mark.parametrize("issuer", RESERVED_ISSUERS)
+def test_an_issuer_in_the_reserved_system_namespace_is_refused_by_the_settings_object(issuer):
+    with pytest.raises(ConfigurationError, match="issuer"):
+        TrustedSettings(issuer, AUDIENCE, {"key-1": _new_public_key()})
+
+
+@pytest.mark.parametrize("issuer", RESERVED_ISSUERS)
+def test_an_issuer_in_the_reserved_system_namespace_is_refused_by_the_loader(tmp_path, issuer):
+    error = _refusal(tmp_path, config=_config_text(issuer=_toml_string(issuer)))
+    assert "issuer" in str(error)
+
+
+@pytest.mark.parametrize("issuer", ["https://system.example", "systematic", "sys:tem", "urn:system:lab"])
+def test_an_issuer_that_only_resembles_the_reserved_namespace_is_accepted(issuer):
+    assert TrustedSettings(issuer, AUDIENCE, {"key-1": _new_public_key()}).issuer == issuer
+
+
 # --- trust boundaries --------------------------------------------------------------------------------------------
 
 

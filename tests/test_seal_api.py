@@ -180,8 +180,8 @@ def test_a_revoked_engagement_seals_nothing(rig):
     assert rig.scanner.calls == 0 and trail(lab)[-1] == ("access.denied", "denied", "engagement_revoked")
 
 
-@pytest.mark.parametrize("method", ["GET", "PUT", "DELETE", "PATCH"])
-def test_only_post_is_accepted_on_the_seal_path(rig, method):
+@pytest.mark.parametrize("method", ["PUT", "DELETE", "PATCH"])  # GET is the coordinator's inspection (M1J, test_acceptance_api.py)
+def test_only_post_and_the_coordinators_get_are_accepted_on_the_seal_path(rig, method):
     delivery = rig.lab.delivered(CLEAN_FILE)
     assert rig.lab.send(method, rig.lab.seal_path(delivery), subject="vendor-1").status_code == 405
     untouched(rig.lab, delivery)

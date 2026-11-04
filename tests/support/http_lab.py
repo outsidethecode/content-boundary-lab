@@ -89,13 +89,19 @@ def advance_row(conn, delivery_id: str, state: str, now: int) -> None:
             policy_fingerprint=engine.policy_fingerprint, verdict="no_detection", scanned_sha256=SEEDED_DIGEST,
             scanned_at=now, valid_until=now + 10**12,
         )  # fmt: skip
+    accepted = state in ("ACCEPTED", "PROMOTING", "PROMOTED")
     conn.execute(
         "UPDATE deliveries SET state = ?, received_size = 7, received_sha256 = ?, uploaded_at = ?, "
         "sealed_size = COALESCE(?, sealed_size), sealed_sha256 = COALESCE(?, sealed_sha256), "
-        "receipt_matched = COALESCE(?, receipt_matched), state_reason = ?, verdict_id = COALESCE(?, verdict_id) WHERE id = ?",
+        "receipt_matched = COALESCE(?, receipt_matched), state_reason = ?, verdict_id = COALESCE(?, verdict_id), "
+        "accepted_sha256 = COALESCE(?, accepted_sha256), accepted_at = COALESCE(?, accepted_at), "
+        "accepted_by = COALESCE(?, accepted_by) WHERE id = ?",
         (
             state, SEEDED_DIGEST, now, 7 if sealed else None, SEEDED_DIGEST if sealed else None, 1 if sealed else None,
-            {"REJECTED": "checksum_mismatch", "SCAN_FAILED": "timeout"}.get(state), verdict_id, delivery_id,
+            {"REJECTED": "checksum_mismatch", "SCAN_FAILED": "timeout"}.get(state), verdict_id,
+            SEEDED_DIGEST if accepted else None, now if accepted else None,
+            conn.execute("SELECT owner_subject_id FROM deliveries WHERE id = ?", (delivery_id,)).fetchone()[0] if accepted else None,
+            delivery_id,
         ),
     )  # fmt: skip
 
@@ -255,6 +261,23 @@ class Lab:
             self.asset_content[short] = f"synthetic content of {short}\n".encode() * 4000
             (self.asset_root / asset_id).write_bytes(self.asset_content[short])
 
+    def subject_id(self, subject: str, issuer: str = tokens.ISSUER) -> int:
+        conn = REAL_CONNECT(self.path)
+        try:
+            return conn.execute("SELECT id FROM subjects WHERE issuer = ? AND subject = ?", (issuer, subject)).fetchone()[0]
+        finally:
+            conn.close()
+
+    def engage(self, subject: str, production: str, role: str) -> str:
+        """Give an existing subject one more engagement (until LONG_END), e.g. a coordinator of a second production."""
+        conn = REAL_CONNECT(self.path)
+        try:
+            with store.transaction(conn):
+                owner = conn.execute("SELECT id FROM subjects WHERE issuer = ? AND subject = ?", (tokens.ISSUER, subject)).fetchone()[0]
+                return store.add_engagement(conn, FixedClock(SEEDED_AT), owner, production, role, LONG_END)
+        finally:
+            conn.close()
+
     def add_asset(self, production: str, display_name: str, content: bytes | None = b"synthetic\n" * 100) -> str:
         """A new asset row, and (unless content is None) its bytes under the trusted root."""
         conn = REAL_CONNECT(self.path)
@@ -301,6 +324,28 @@ class Lab:
         if length is not None:
             headers.append((b"content-length", str(length).encode()))
         return Client(method="PUT", path=self.content_path(delivery_id, production), headers=headers, inbound=list(chunks), then=then, **kwargs)
+
+    def token_at(self, subject: str, moment: datetime) -> str:
+        """A token for `subject` that is valid at `moment` (the default test token is valid at T0 only, for five minutes)."""
+        seconds = tokens.NOW + int((moment - T0).total_seconds() // 1)
+        return self.token(subject, iat=seconds, nbf=seconds, exp=seconds + 300)
+
+    def sealed(self, content: bytes, subject: str = "vendor-1", production: str | None = None, **declared) -> str:
+        """A delivery uploaded and sealed to SCAN_PASSED by `subject`'s own requests."""
+        delivery = self.delivered(content, subject, production, **declared)
+        assert self.seal(delivery, subject, production).status_code == 200
+        return delivery
+
+    def inspect(self, delivery_id: str, subject: str | None = "coordinator-1", production: str | None = None, **options):
+        """The coordinator's inspection of a delivery's sealing result: GET .../seal."""
+        return self.send("GET", self.seal_path(delivery_id, production), subject=subject, **options)
+
+    def accept(self, delivery_id: str, sha256, subject: str | None = "coordinator-1", production: str | None = None, **options):
+        """The coordinator's acceptance of the digest `sha256` of a delivery: POST .../accept."""
+        return self.send("POST", self.accept_path(delivery_id, production), subject=subject, json={"sealed_sha256": sha256}, **options)
+
+    def accept_path(self, delivery_id: str, production: str | None = None) -> str:
+        return f"{self.deliveries_path(production)}/{quote(delivery_id, safe='')}/accept"
 
     def seal_path(self, delivery_id: str, production: str | None = None) -> str:
         return f"{self.deliveries_path(production)}/{quote(delivery_id, safe='')}/seal"

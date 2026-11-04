@@ -140,6 +140,9 @@ _SCHEMA: tuple[str, ...] = (
         receipt_matched INTEGER CHECK (receipt_matched IN (0, 1)),
         state_reason TEXT,
         verdict_id TEXT REFERENCES verdicts (id) ON DELETE RESTRICT,
+        accepted_sha256 TEXT CHECK (length(accepted_sha256) = 64 AND accepted_sha256 NOT GLOB '*[^0-9a-f]*'),
+        accepted_at INTEGER CHECK (accepted_at >= 0),
+        accepted_by INTEGER REFERENCES subjects (id) ON DELETE RESTRICT,
         CHECK ((state = 'INITIATED') = (received_sha256 IS NULL)),
         CHECK ((received_sha256 IS NULL) = (received_size IS NULL) AND (received_sha256 IS NULL) = (uploaded_at IS NULL)),
         CHECK ((sealed_sha256 IS NULL) = (sealed_size IS NULL) AND (sealed_sha256 IS NULL) = (receipt_matched IS NULL)),
@@ -150,7 +153,11 @@ _SCHEMA: tuple[str, ...] = (
             OR (state = 'SCAN_FAILED' AND state_reason IS NOT NULL AND state_reason IN ('unavailable', 'timeout', 'bad_response'))
             OR (state NOT IN ('REJECTED', 'SCAN_FAILED') AND state_reason IS NULL)
         ),
-        CHECK (state != 'SCAN_PASSED' OR verdict_id IS NOT NULL)
+        CHECK (state != 'SCAN_PASSED' OR verdict_id IS NOT NULL),
+        CHECK ((accepted_sha256 IS NULL) = (accepted_at IS NULL) AND (accepted_sha256 IS NULL) = (accepted_by IS NULL)),
+        CHECK (accepted_sha256 IS NULL OR accepted_sha256 = sealed_sha256),
+        CHECK (accepted_sha256 IS NULL OR state IN ('ACCEPTED', 'PROMOTING', 'PROMOTED', 'INTEGRITY_FAILED')),
+        CHECK (state NOT IN ('ACCEPTED', 'PROMOTING', 'PROMOTED') OR (accepted_sha256 IS NOT NULL AND verdict_id IS NOT NULL))
     ) STRICT""",
     # A delivery is created in INITIATED and never deleted, replaced or renamed (INSERT OR REPLACE would delete a row
     # without firing the delete trigger, so a BEFORE INSERT guard rejects any insert that collides on id, rowid or
@@ -201,6 +208,22 @@ _SCHEMA: tuple[str, ...] = (
         WHERE v.id = NEW.verdict_id AND v.sha256 = NEW.sealed_sha256 AND v.verdict = 'no_detection'
     )
     BEGIN SELECT RAISE(ABORT, 'a delivery passes the scan only with a no_detection verdict bound to its sealed digest'); END""",
+    # M1J. A coordinator's acceptance is bound to the sealed digest: the move into ACCEPTED needs the verdict the delivery
+    # passed with to still be a no_detection verdict for that digest, and the acceptance record (the digest accepted, when,
+    # by whom) is written with it, once, and with the verdict it relied on never changed. Whether the verdict is still in
+    # force is decided when the coordinator accepts, by the server, in the same transaction; a row cannot say it.
+    """CREATE TRIGGER deliveries_acceptance_needs_a_matching_verdict BEFORE UPDATE ON deliveries
+    WHEN NEW.state = 'ACCEPTED' AND OLD.state != 'ACCEPTED' AND NOT EXISTS (
+        SELECT 1 FROM verdicts AS v
+        WHERE v.id = NEW.verdict_id AND v.sha256 = NEW.sealed_sha256 AND v.verdict = 'no_detection'
+    )
+    BEGIN SELECT RAISE(ABORT, 'a delivery is accepted only on a no_detection verdict bound to its sealed digest'); END""",
+    """CREATE TRIGGER deliveries_acceptance_is_final BEFORE UPDATE ON deliveries
+    WHEN OLD.accepted_sha256 IS NOT NULL AND (
+        NEW.accepted_sha256 IS NOT OLD.accepted_sha256 OR NEW.accepted_at IS NOT OLD.accepted_at
+        OR NEW.accepted_by IS NOT OLD.accepted_by OR NEW.verdict_id IS NOT OLD.verdict_id
+    )
+    BEGIN SELECT RAISE(ABORT, 'delivery acceptance is final'); END""",
     # A scanner verdict is bound to the digest of the bytes it was made for, by the engine and policy that made it, and is
     # kept for audit for good: it is never changed, deleted or replaced. Whether one may be reused is decided when it is
     # read (same digest, engine, version, kind and policy, a no_detection verdict, not expired), never by editing it.

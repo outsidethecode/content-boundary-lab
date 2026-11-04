@@ -43,6 +43,10 @@ decide() runs steps 1 to 8 and returns the Decision, respond() builds the answer
 transaction for the same request that skips steps 4 and 5 (the caller and grant of the first are passed in) and keeps
 the rest. Each transaction appends exactly one audit event, so such a request leaves one event per committed decision.
 
+The lab's own work (the internal rescan, M1J) is not a request, so it has no caller to authenticate or authorise. It uses
+run_system(): the same transaction, one clock read and exactly-one-audit-event rules, with one of the named system actors
+(audit.SYSTEM_ACTORS) in place of a caller, and a failure raised to the operator's code instead of answered to a client.
+
 Scope of the audit guarantee. One audit event per request holds for the decisions a handler makes through this flow. An
 unmatched path, a method the route does not accept and any other answer the framework gives before a handler runs (404,
 405) are outside it: no handler runs, so nothing is decided, recorded or marked no-store.
@@ -172,8 +176,27 @@ class Context:
     production_id: str
     body: RequestBody | None = None
 
+    @property
+    def actor(self) -> audit.Actor:
+        """Who the audit trail names for this request: the verified caller (a system operation names its own actor)."""
+        return self.caller.as_actor()
+
+
+@dataclass(frozen=True)
+class SystemContext:
+    """What an operation of the lab's own work may use (run_system): the same transaction, clock and audit rules as a
+    request, but the actor is one of the named system actors and there is no caller, no grant and no body. The production
+    is the one the work is about, or None when it could not be determined (a delivery that does not exist)."""
+
+    conn: sqlite3.Connection
+    clock: Clock
+    now_micros: int
+    actor: audit.Actor
+    production_id: str | None
+
 
 Operation = Callable[[Context], Decision]
+SystemOperation = Callable[[SystemContext], Decision]
 
 
 async def read_body(request: Request) -> RequestBody:
@@ -507,6 +530,35 @@ def proceed(
         return operation(Context(conn, snapshot, now_micros, caller, grant, production_id, None))
 
     return _guarded(clock, database_path, decided)
+
+
+def run_system(
+    clock: Clock,
+    database_path: Path,
+    *,
+    actor: audit.Actor,
+    production_id: str | None,
+    operation: SystemOperation,
+) -> Decision:
+    """One transaction of the lab's own work (the internal rescan), under one of the named system actors.
+
+    It keeps what makes a request a request: BEGIN IMMEDIATE, one clock read for the transaction, the operation, exactly
+    one audit event (a miscount rolls everything back) and COMMIT. It authenticates and authorises nobody, because there is
+    no caller: the actor must be a member of audit.SYSTEM_ACTORS, and the audit trail refuses that identity anything
+    outside its own events. Unlike a request it has no client to answer: a failure rolls back and is raised to the code
+    that called it, which is the operator's. Only trust.rescan() calls it (tests/guards/test_delivery_scope.py).
+    """
+    if not isinstance(actor, audit.Actor) or actor not in audit.SYSTEM_ACTORS:
+        raise ValueError("run_system runs only as one of the named system actors")
+    if production_id is not None and type(production_id) is not str:
+        raise TypeError("production_id must be a str or None")
+    if not callable(operation):
+        raise TypeError("operation must be callable")
+
+    def decided(conn: sqlite3.Connection, snapshot: _Snapshot, now_micros: int) -> Decision:
+        return operation(SystemContext(conn, snapshot, now_micros, actor, production_id))
+
+    return _run(clock, database_path, decided)
 
 
 def respond(decision: Decision) -> Response:

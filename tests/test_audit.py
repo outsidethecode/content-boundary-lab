@@ -36,6 +36,11 @@ VOCABULARY = {
         "delivery.verdict_reused",
         "delivery.rejected",
         "delivery.scan_failed",
+        "delivery.viewed",
+        "delivery.accepted",
+        "delivery.acceptance_refused",
+        "delivery.rescan_started",
+        "delivery.integrity_failed",
     },
     AuditReason: {
         "no_engagement",
@@ -56,6 +61,10 @@ VOCABULARY = {
         "scanner_unavailable",
         "scanner_timeout",
         "scanner_bad_response",
+        "verdict_stale",
+        "verdict_not_applicable",
+        "digest_mismatch",
+        "sealed_content_changed",
     },
     ObjectType: {"production", "engagement", "asset", "subject", "delivery"},
     Outcome: {"allowed", "denied", "recorded"},
@@ -324,7 +333,12 @@ VERDICT_BEARING = {
     "a scan that failed (unavailable)": (AuditAction.DELIVERY_SCAN_FAILED, Outcome.RECORDED, AuditReason.SCANNER_UNAVAILABLE),
     "a scan that failed (bad response)": (AuditAction.DELIVERY_SCAN_FAILED, Outcome.RECORDED, AuditReason.SCANNER_BAD_RESPONSE),
     "a detection": (AuditAction.DELIVERY_REJECTED, Outcome.DENIED, AuditReason.DETECTION),
-}
+    "an acceptance": (AuditAction.DELIVERY_ACCEPTED, Outcome.ALLOWED, None),
+    "an acceptance refused for a stale verdict": (AuditAction.DELIVERY_ACCEPTANCE_REFUSED, Outcome.DENIED, AuditReason.VERDICT_STALE),
+    "an acceptance refused for a verdict that does not apply": (
+        AuditAction.DELIVERY_ACCEPTANCE_REFUSED, Outcome.DENIED, AuditReason.VERDICT_NOT_APPLICABLE
+    ),
+}  # fmt: skip
 NOT_VERDICT_BEARING = {
     "an access denial": (AuditAction.ACCESS_DENIED, Outcome.DENIED, AuditReason.NO_ENGAGEMENT),
     "an engagement created": (AuditAction.ENGAGEMENT_CREATED, Outcome.ALLOWED, None),
@@ -336,6 +350,13 @@ NOT_VERDICT_BEARING = {
     "a request rejected": (AuditAction.DELIVERY_REQUEST_REJECTED, Outcome.DENIED, AuditReason.STATE_CONFLICT),
     "a checksum mismatch": (AuditAction.DELIVERY_REJECTED, Outcome.DENIED, AuditReason.CHECKSUM_MISMATCH),
     "an unsupported type": (AuditAction.DELIVERY_REJECTED, Outcome.DENIED, AuditReason.UNSUPPORTED_TYPE),
+    "an acceptance refused for the state": (AuditAction.DELIVERY_ACCEPTANCE_REFUSED, Outcome.DENIED, AuditReason.STATE_CONFLICT),
+    "an acceptance refused for the digest": (AuditAction.DELIVERY_ACCEPTANCE_REFUSED, Outcome.DENIED, AuditReason.DIGEST_MISMATCH),
+    "an acceptance refused for a revoked vendor": (AuditAction.DELIVERY_ACCEPTANCE_REFUSED, Outcome.DENIED, AuditReason.ENGAGEMENT_REVOKED),
+    "an acceptance refused for an invalid request": (AuditAction.DELIVERY_ACCEPTANCE_REFUSED, Outcome.DENIED, AuditReason.INVALID_REQUEST),
+    "a rescan started": (AuditAction.DELIVERY_RESCAN_STARTED, Outcome.ALLOWED, None),
+    "a rescan started for a stale verdict": (AuditAction.DELIVERY_RESCAN_STARTED, Outcome.ALLOWED, AuditReason.VERDICT_STALE),
+    "an integrity failure": (AuditAction.DELIVERY_INTEGRITY_FAILED, Outcome.DENIED, AuditReason.SEALED_CONTENT_CHANGED),
 }
 
 
@@ -403,6 +424,82 @@ def test_an_event_with_an_engine_kind_stays_append_only(conn, clock):
             "INSERT OR REPLACE INTO audit_events (seq, at, action, outcome) VALUES (?, 1, 'forged', 'recorded')", (seq,)
         )
     assert _events(conn) == before
+
+
+@pytest.mark.parametrize("kind", [None, EngineKind.SYNTHETIC], ids=["no verdict shown", "a verdict shown"])
+def test_viewing_a_delivery_records_the_engine_kind_when_a_verdict_is_shown_and_only_then(conn, clock, kind):
+    with store.transaction(conn):
+        _record(conn, clock, action=AuditAction.DELIVERY_VIEWED, outcome=Outcome.ALLOWED, engine_kind=kind, **DELIVERY)
+    (event,) = _events(conn)
+    assert event["engine_kind"] == (kind.value if kind else None)
+
+
+# --- M1J: the one bounded system actor (the internal rescan) --------------------------------------------------------------
+#
+# A rescan is neither a vendor's nor a coordinator's act, so it is recorded under its own named identity in a namespace
+# no token issuer can have. record_event refuses that namespace to anybody else, and refuses the system actor anything
+# but the events a rescan produces: it cannot accept, view, read an asset or manage an engagement.
+
+SYSTEM_ALLOWED = {
+    "a rescan started": (AuditAction.DELIVERY_RESCAN_STARTED, Outcome.ALLOWED, None, None),
+    "a rescan started for a stale verdict": (AuditAction.DELIVERY_RESCAN_STARTED, Outcome.ALLOWED, AuditReason.VERDICT_STALE, None),
+    "a scan that passed": (AuditAction.DELIVERY_SCAN_PASSED, Outcome.RECORDED, None, EngineKind.SYNTHETIC),
+    "a verdict reused": (AuditAction.DELIVERY_VERDICT_REUSED, Outcome.RECORDED, None, EngineKind.SYNTHETIC),
+    "a detection": (AuditAction.DELIVERY_REJECTED, Outcome.DENIED, AuditReason.DETECTION, EngineKind.SYNTHETIC),
+    "a scan that failed": (AuditAction.DELIVERY_SCAN_FAILED, Outcome.RECORDED, AuditReason.SCANNER_TIMEOUT, EngineKind.SYNTHETIC),
+    "an integrity failure": (AuditAction.DELIVERY_INTEGRITY_FAILED, Outcome.DENIED, AuditReason.SEALED_CONTENT_CHANGED, None),
+    "a refused rescan": (AuditAction.DELIVERY_REQUEST_REJECTED, Outcome.DENIED, AuditReason.STATE_CONFLICT, None),
+}  # fmt: skip
+SYSTEM_ACTIONS = frozenset(case[0] for case in SYSTEM_ALLOWED.values())
+
+
+def test_the_system_actor_is_one_named_identity_in_a_namespace_no_issuer_can_have():
+    assert audit.SYSTEM_RESCAN == Actor("system:content-boundary-lab", "rescan")
+    assert audit.SYSTEM_ACTORS == frozenset({audit.SYSTEM_RESCAN})
+    assert all(actor.issuer.startswith(audit.SYSTEM_ISSUER_PREFIX) for actor in audit.SYSTEM_ACTORS)
+
+
+@pytest.mark.parametrize("case", SYSTEM_ALLOWED.values(), ids=list(SYSTEM_ALLOWED))
+def test_the_system_actor_may_record_the_events_of_a_rescan(conn, clock, case):
+    action, outcome, reason, kind = case
+    with store.transaction(conn):
+        _record(conn, clock, action=action, outcome=outcome, reason=reason, engine_kind=kind, actor=audit.SYSTEM_RESCAN, **DELIVERY)
+    (event,) = _events(conn)
+    assert (event["actor_issuer"], event["actor_subject"], event["action"]) == ("system:content-boundary-lab", "rescan", action.value)
+
+
+@pytest.mark.parametrize("action", [action for action in AuditAction if action not in SYSTEM_ACTIONS], ids=lambda action: action.value)
+def test_the_system_actor_may_record_nothing_else(conn, clock, action):
+    kind = EngineKind.SYNTHETIC if action in (AuditAction.DELIVERY_ACCEPTED, AuditAction.DELIVERY_VIEWED) else None
+    with pytest.raises(ValueError, match="system actor"), store.transaction(conn):
+        _record(conn, clock, action=action, outcome=Outcome.ALLOWED, actor=audit.SYSTEM_RESCAN, engine_kind=kind, **DELIVERY)
+    assert _events(conn) == []
+
+
+@pytest.mark.parametrize(
+    ("issuer", "subject"),
+    [
+        ("system:content-boundary-lab", "somebody"),  # the namespace, under another name
+        ("system:other", "rescan"),
+        ("system:", "rescan"),
+        ("system:content-boundary-lab:", "rescan"),
+        ("system:content-boundary-lab ", "rescan"),
+        ("SYSTEM:content-boundary-lab", "rescan"),  # the namespace is compared without regard to case
+        ("System:Content-Boundary-Lab", "rescan"),
+    ],
+)
+def test_nobody_else_may_use_the_system_namespace(conn, clock, issuer, subject):
+    impostor = Actor(issuer, subject)  # an Actor only checks the shape of a pair, as before
+    with pytest.raises(ValueError, match="system actor"), store.transaction(conn):
+        _record(conn, clock, action=AuditAction.DELIVERY_RESCAN_STARTED, outcome=Outcome.ALLOWED, actor=impostor, **DELIVERY)
+    assert _events(conn) == []
+
+
+def test_an_ordinary_issuer_that_merely_resembles_the_namespace_is_not_the_system(conn, clock):
+    with store.transaction(conn):
+        _record(conn, clock, actor=Actor("https://system.example", "rescan"))
+        _record(conn, clock, actor=Actor("systematic", "rescan"))
+    assert len(_events(conn)) == 2
 
 
 def test_the_engine_kind_is_one_of_the_columns_the_schema_check_protects(db_path, conn):

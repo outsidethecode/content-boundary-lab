@@ -24,6 +24,8 @@ ALLOWED_ROUTES: frozenset[tuple[str, frozenset[str]]] = frozenset(
         ("/productions/{production_id:path}/deliveries", frozenset({"POST"})),
         ("/productions/{production_id:path}/deliveries/{delivery_id:path}/content", frozenset({"PUT"})),
         ("/productions/{production_id:path}/deliveries/{delivery_id:path}/seal", frozenset({"POST"})),
+        ("/productions/{production_id:path}/deliveries/{delivery_id:path}/seal", frozenset({"GET"})),  # M1J: the coordinator's inspection
+        ("/productions/{production_id:path}/deliveries/{delivery_id:path}/accept", frozenset({"POST"})),
     }
 )
 UNSERVED_PATHS = ["/", "/docs", "/docs/oauth2-redirect", "/redoc", "/openapi.json"]
@@ -235,6 +237,7 @@ def test_openapi_schema_describes_only_the_approved_routes(app):
         "/productions/{production_id}/deliveries",
         "/productions/{production_id}/deliveries/{delivery_id}/content",
         "/productions/{production_id}/deliveries/{delivery_id}/seal",
+        "/productions/{production_id}/deliveries/{delivery_id}/accept",
     }
 
 

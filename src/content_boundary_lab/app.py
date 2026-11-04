@@ -5,7 +5,7 @@ from pathlib import Path
 
 from fastapi import FastAPI
 
-from content_boundary_lab import assets, engagements, ingest, management, trust
+from content_boundary_lab import acceptance, assets, engagements, ingest, management, trust
 from content_boundary_lab.clock import Clock
 from content_boundary_lab.scanner import EngineIdentity, Scanner
 from content_boundary_lab.settings import TrustedSettings
@@ -109,6 +109,18 @@ def create_app(deps: Dependencies) -> FastAPI:
     app.add_api_route(
         trust.SEAL_PATH,
         trust.build_endpoint(deps.settings, deps.clock, deps.database_path, deps.quarantine_root, deps.scanner),
+        methods=["POST"],
+    )
+    # The coordinator's side of the same delivery. The engine is asked of the scanner at each request, not kept: an
+    # upgraded scanner changes which verdicts still count at the next acceptance. Neither route is given the scanner.
+    app.add_api_route(
+        acceptance.INSPECT_PATH,
+        acceptance.build_inspect_endpoint(deps.settings, deps.clock, deps.database_path, lambda: deps.scanner.engine),
+        methods=["GET"],
+    )
+    app.add_api_route(
+        acceptance.ACCEPT_PATH,
+        acceptance.build_accept_endpoint(deps.settings, deps.clock, deps.database_path, lambda: deps.scanner.engine),
         methods=["POST"],
     )
     return app

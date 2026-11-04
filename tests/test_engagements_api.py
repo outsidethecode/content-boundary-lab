@@ -928,6 +928,7 @@ def test_the_application_registers_only_the_approved_routes_and_serves_no_docume
         "/productions/{production_id:path}/deliveries",
         "/productions/{production_id:path}/deliveries/{delivery_id:path}/content",
         "/productions/{production_id:path}/deliveries/{delivery_id:path}/seal",
+        "/productions/{production_id:path}/deliveries/{delivery_id:path}/accept",
     }
     for path in ("/docs", "/redoc", "/openapi.json", "/"):
         assert lab.client.get(path).status_code == 404

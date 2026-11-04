@@ -4,9 +4,13 @@ Three things are checked over src/, each against bad and good samples so that th
 
 1. SQL that names the deliveries table: store.py may create it and insert rows; ingest.py may read a delivery only by the
    one scoped statement (or by the two fixed reconciliation reads) and may update it only by the compare-and-set that
-   names the delivery, its production, its owner and the state INITIATED. Nothing may delete or replace a row.
-2. request_flow.proceed() runs a transaction without authenticating anyone, so only ingest.py may call it, and only
-   after request_flow.decide() has authorised the same request.
+   names the delivery, its production, its owner and the state INITIATED. Nothing may delete or replace a row. M1J adds
+   two more owners: acceptance.py reads a delivery only through the coordinator-scoped statement and moves it only by
+   the compare-and-set that binds the sealed digest and the verdict; trust.py's rescan reads the one delivery the
+   operator names (no caller is involved) and moves it only from SCAN_FAILED or SCAN_PASSED back to SEALING.
+2. request_flow.proceed() runs a transaction without authenticating anyone, so only ingest.py and trust.py may call it,
+   and only after request_flow.decide() has authorised the same request. request_flow.run_system() runs one for the lab's
+   own named system actor, and only trust.py's rescan may call it.
 3. Only assets.py (the trusted root) and quarantine.py (the quarantine root) open, move or delete files, and neither
    mentions the other's root. Nothing that can write quarantine can write the trusted asset root.
 
@@ -20,17 +24,33 @@ from pathlib import Path
 import pytest
 
 PACKAGE = Path(__file__).resolve().parents[2] / "src" / "content_boundary_lab"
-STORE, INGEST, TRUST = Path("store.py"), Path("ingest.py"), Path("trust.py")
+STORE, INGEST, TRUST, ACCEPTANCE = Path("store.py"), Path("ingest.py"), Path("trust.py"), Path("acceptance.py")
 SQL_START = re.compile(r"\s*(SELECT|INSERT|UPDATE|DELETE|CREATE|WITH|REPLACE|DROP|ALTER)\b", re.IGNORECASE)
 NAMES_DELIVERIES = re.compile(r"\bdeliveries\b", re.IGNORECASE)
 SCOPED_READ = (r"\bd\.id = \?", r"\bd\.production_id = \?", r"\bissuer = \?", r"\bsubject = \?", r"revoked_at IS NULL", r"ends_at > \?")
-# The modules that may change a delivery, each by compare-and-set from the state it owns, naming the delivery, its
-# production and its owner, and setting only the columns that step writes: ingest INITIATED -> UPLOADED; trust the seal.
+OWNER_READ = SCOPED_READ + (r"\be\.subject_id = d\.owner_subject_id",)  # ingest: the caller is the delivery's owner
+COORDINATOR_READ = SCOPED_READ + (r"\brole = 'coordinator'",)  # the same scope, for the coordinator of the delivery's production
+SYSTEM_READ = re.compile(r"SELECT [\w., ]+ FROM deliveries AS d WHERE d\.id = \?$")  # the rescan: the one delivery the operator named
+# The modules that may change a delivery, each by compare-and-set from the state it owns, naming the delivery and its
+# production and what else binds the step, and setting only the columns that step writes: ingest INITIATED -> UPLOADED;
+# trust the seal (UPLOADED -> SEALING -> its outcome) and the rescan (SCAN_FAILED or SCAN_PASSED -> SEALING, which keeps
+# the seal); acceptance SCAN_PASSED -> ACCEPTED, bound to the sealed digest and the verdict. Keyed by the state the
+# statement moves a delivery from, which it must end with.
+OWNED = (r"\bid = \?", r"\bproduction_id = \?", r"\bowner_subject_id = \?")
 SETTERS = {
-    INGEST: ("INITIATED", {"state", "received_size", "received_sha256", "uploaded_at"}),
+    INGEST: ({"INITIATED": {"state", "received_size", "received_sha256", "uploaded_at"}}, OWNED),
     TRUST: (
-        "UPLOADED|SEALING",
-        {"state", "state_reason", "sealed_size", "sealed_sha256", "receipt_matched", "verdict_id"},
+        {
+            "UPLOADED": {"state"},
+            "SEALING": {"state", "state_reason", "sealed_size", "sealed_sha256", "receipt_matched", "verdict_id"},
+            "SCAN_FAILED": {"state", "state_reason", "verdict_id"},
+            "SCAN_PASSED": {"state", "state_reason", "verdict_id"},
+        },
+        OWNED,
+    ),
+    ACCEPTANCE: (
+        {"SCAN_PASSED": {"state", "accepted_sha256", "accepted_at", "accepted_by"}},
+        (r"\bid = \?", r"\bproduction_id = \?", r"\bsealed_sha256 = \?", r"\bverdict_id = \?"),
     ),
 }
 RECONCILIATION_READS = (
@@ -65,19 +85,26 @@ def sql_violations(relative: Path, source: str) -> list[str]:
             if verb not in {"CREATE", "INSERT"}:
                 problems.append(f"{where} outside the reading module")
         elif relative in SETTERS:
-            from_state, changeable = SETTERS[relative]
+            changeable_from, binding = SETTERS[relative]
             if verb == "SELECT":
-                scoped = all(re.search(pattern, text) for pattern in SCOPED_READ)
-                reconciliation = any(pattern.fullmatch(text) for pattern in RECONCILIATION_READS)
-                if relative == TRUST:  # the seal reads a delivery only through ingest.get_delivery_in_scope
-                    problems.append(f"{where} that reads a delivery other than through ingest.get_delivery_in_scope")
-                elif not scoped and not reconciliation:
-                    problems.append(f"{where} that is neither the scoped read nor a reconciliation read")
+                if relative == TRUST:  # the seal reads through ingest.get_delivery_in_scope; only the rescan reads by id
+                    if not SYSTEM_READ.fullmatch(text):
+                        problems.append(f"{where} that is not the rescan's read of the one delivery the operator named")
+                elif relative == ACCEPTANCE:
+                    if not all(re.search(pattern, text) for pattern in COORDINATOR_READ):
+                        problems.append(f"{where} that is not the coordinator-scoped read")
+                elif not all(re.search(pattern, text) for pattern in OWNER_READ) and not any(
+                    pattern.fullmatch(text) for pattern in RECONCILIATION_READS
+                ):
+                    problems.append(f"{where} that is neither the owner-scoped read nor a reconciliation read")
             elif verb == "UPDATE":
                 assignments = re.search(r"\bSET\b(.*)\bWHERE\b", text, re.IGNORECASE | re.DOTALL)
                 columns = {part.split("=")[0].strip() for part in assignments.group(1).split(",")} if assignments else {"?"}
-                required = (r"\bid = \?", r"\bproduction_id = \?", r"\bowner_subject_id = \?", rf"\bstate = '(?:{from_state})'\s*$")
-                missing = [pattern for pattern in required if not re.search(pattern, text)]
+                from_state = re.search(r"\bstate = '(\w+)'\s*$", text)
+                changeable = changeable_from.get(from_state.group(1) if from_state else "", set())
+                missing = [pattern for pattern in binding if not re.search(pattern, text)]
+                if not from_state or from_state.group(1) not in changeable_from:
+                    missing.append("a state it may move a delivery from")
                 if missing or not columns <= changeable:
                     problems.append(f"{where} that is not a compare-and-set of {relative} (missing {missing}, sets {sorted(columns - changeable)})")
             else:
@@ -189,7 +216,87 @@ def test_the_guard_accepts_the_two_compare_and_sets_of_the_seal_in_trust_only():
     assert sql_violations(TRUST, _module(CAS))  # and trust may not do ingest's
 
 
+# --- M1J: the coordinator's read and acceptance, and the rescan's read and restart ---------------------------------------------
+
+REVIEW = (
+    "SELECT d.id, d.production_id, d.owner_subject_id, d.state, d.sealed_sha256, s.id, "
+    "EXISTS (SELECT 1 FROM engagements AS o WHERE o.subject_id = d.owner_subject_id AND o.production_id = d.production_id "
+    "AND o.revoked_at IS NOT NULL) FROM deliveries AS d "
+    "JOIN engagements AS e ON e.production_id = d.production_id JOIN subjects AS s ON s.id = e.subject_id "
+    "WHERE d.id = ? AND d.production_id = ? AND s.issuer = ? AND s.subject = ? AND e.role = 'coordinator' "
+    "AND e.revoked_at IS NULL AND e.ends_at > ?"
+)
+ACCEPT = (
+    "UPDATE deliveries SET state = 'ACCEPTED', accepted_sha256 = ?, accepted_at = ?, accepted_by = ? "
+    "WHERE id = ? AND production_id = ? AND sealed_sha256 = ? AND verdict_id = ? AND state = 'SCAN_PASSED'"
+)
+RESCAN_READ = (
+    "SELECT d.id, d.production_id, d.owner_subject_id, d.storage_key, d.state, d.sealed_size, d.sealed_sha256, d.verdict_id "
+    "FROM deliveries AS d WHERE d.id = ?"
+)
+RESCAN_START = (
+    "UPDATE deliveries SET state = 'SEALING', state_reason = NULL, verdict_id = NULL "
+    "WHERE id = ? AND production_id = ? AND owner_subject_id = ? AND state = '{state}'"
+)
+ACCEPTANCE_BAD = {
+    "a read by id alone": "SELECT d.id FROM deliveries AS d WHERE d.id = ?",
+    "the review without the coordinator's role": REVIEW.replace(" AND e.role = 'coordinator'", ""),
+    "the review without the revocation test": REVIEW.replace(" AND e.revoked_at IS NULL", ""),
+    "the review without the end of the engagement": REVIEW.replace(" AND e.ends_at > ?", ""),
+    "the review without the production": REVIEW.replace(" AND d.production_id = ?", ""),
+    "the review without the caller's issuer": REVIEW.replace(" AND s.issuer = ?", ""),
+    "an acceptance that does not bind the digest": ACCEPT.replace(" AND sealed_sha256 = ?", ""),
+    "an acceptance that does not bind the verdict": ACCEPT.replace(" AND verdict_id = ?", ""),
+    "an acceptance without the production": ACCEPT.replace(" AND production_id = ?", ""),
+    "an acceptance from any state": ACCEPT.replace(" AND state = 'SCAN_PASSED'", ""),
+    "an acceptance from a failed scan": ACCEPT.replace("'SCAN_PASSED'", "'SCAN_FAILED'"),
+    "an acceptance that rewrites the seal": ACCEPT.replace("SET state = 'ACCEPTED'", "SET sealed_sha256 = ?, state = 'ACCEPTED'"),
+    "an acceptance that swaps the verdict": ACCEPT.replace("SET state = 'ACCEPTED'", "SET verdict_id = ?, state = 'ACCEPTED'"),
+    "a delete": "DELETE FROM deliveries WHERE id = ?",
+    "an insert": "INSERT INTO deliveries (id) VALUES (?)",
+}
+
+
+@pytest.mark.parametrize("statement", ACCEPTANCE_BAD.values(), ids=list(ACCEPTANCE_BAD))
+def test_the_guard_flags_every_way_for_acceptance_to_read_or_move_a_delivery_that_leaves_a_condition_out(statement):
+    assert sql_violations(ACCEPTANCE, _module(statement))
+
+
+def test_the_guard_accepts_the_coordinator_read_and_the_acceptance_in_acceptance_only():
+    for statement in (REVIEW, ACCEPT):
+        assert sql_violations(ACCEPTANCE, _module(statement)) == []
+        for other in (INGEST, TRUST, Path("management.py"), STORE):
+            assert sql_violations(other, _module(statement)), other
+    assert sql_violations(ACCEPTANCE, _module(CAS)) and sql_violations(ACCEPTANCE, _module(SEAL_START))
+    assert sql_violations(ACCEPTANCE, _module(SCOPED))  # the owner's read is not the coordinator's
+
+
+RESCAN_BAD = {
+    "a read of a delivery by id, unaliased": "SELECT state FROM deliveries WHERE id = ?",
+    "a read that adds a condition it should not skip": RESCAN_READ + " OR 1 = 1",
+    "a restart without the owner": RESCAN_START.format(state="SCAN_FAILED").replace(" AND owner_subject_id = ?", ""),
+    "a restart without the production": RESCAN_START.format(state="SCAN_FAILED").replace(" AND production_id = ?", ""),
+    "a restart from any state": RESCAN_START.format(state="SCAN_FAILED").replace(" AND state = 'SCAN_FAILED'", ""),
+    "a restart from an accepted delivery": RESCAN_START.format(state="ACCEPTED"),
+    "a restart from a rejected delivery": RESCAN_START.format(state="REJECTED"),
+    "a restart that clears the seal": RESCAN_START.format(state="SCAN_FAILED").replace("SET state", "SET sealed_sha256 = NULL, state"),
+}
+
+
+@pytest.mark.parametrize("statement", RESCAN_BAD.values(), ids=list(RESCAN_BAD))
+def test_the_guard_flags_a_rescan_that_reads_or_restarts_more_than_it_may(statement):
+    assert sql_violations(TRUST, _module(statement))
+
+
+def test_the_guard_accepts_the_rescans_read_and_its_two_restarts_in_trust_only():
+    for statement in (RESCAN_READ, RESCAN_START.format(state="SCAN_FAILED"), RESCAN_START.format(state="SCAN_PASSED")):
+        assert sql_violations(TRUST, _module(statement)) == []
+        for other in (INGEST, ACCEPTANCE, Path("management.py"), STORE):
+            assert sql_violations(other, _module(statement)), other
+
+
 NAMES_VERDICTS = re.compile(r"\bverdicts\b", re.IGNORECASE)
+VERDICT_BY_ID = re.compile(r"SELECT [\w., ]+ FROM verdicts WHERE id = \?$")  # a verdict row is immutable; its id is the delivery's
 CACHE_READ = (
     r"\bsha256 = \?", r"\bengine_id = \?", r"\bengine_version = \?", r"\bengine_kind = \?", r"\bpolicy_fingerprint = \?",
     r"\bverdict = 'no_detection'", r"\bvalid_until > \?",
@@ -204,7 +311,7 @@ def verdict_violations(relative: Path, source: str) -> list[str]:
         if relative == STORE:
             ok = verb in {"CREATE", "INSERT"}
         elif relative == TRUST:
-            ok = verb == "SELECT" and all(re.search(pattern, text) for pattern in CACHE_READ)
+            ok = verb == "SELECT" and (all(re.search(pattern, text) for pattern in CACHE_READ) or bool(VERDICT_BY_ID.fullmatch(text)))
         else:
             ok = False
         if not ok:
@@ -233,9 +340,13 @@ def test_the_guard_flags_every_way_of_reusing_a_verdict_that_leaves_a_condition_
     assert verdict_violations(Path("ingest.py"), _module(statement))
 
 
-def test_the_guard_accepts_the_one_cache_lookup_in_trust_and_the_stores_inserts():
-    assert verdict_violations(TRUST, _module(LOOKUP)) == []
+def test_the_guard_accepts_the_one_cache_lookup_and_the_read_by_id_in_trust_and_the_stores_inserts():
+    by_id = "SELECT id, sha256, engine_id, engine_version, engine_kind, policy_fingerprint, verdict, scanned_sha256, scanned_at, valid_until FROM verdicts WHERE id = ?"
+    assert verdict_violations(TRUST, _module(LOOKUP)) == [] and verdict_violations(TRUST, _module(by_id)) == []
     assert verdict_violations(Path("ingest.py"), _module(LOOKUP))  # only trust reads the cache
+    for module in (Path("ingest.py"), ACCEPTANCE, STORE):
+        assert verdict_violations(module, _module(by_id)), module  # and only trust reads a verdict, acceptance through trust
+    assert verdict_violations(TRUST, _module(by_id + " OR 1 = 1")) and verdict_violations(TRUST, _module("SELECT id FROM verdicts"))
     assert verdict_violations(STORE, _module("INSERT INTO verdicts (id) VALUES (?)")) == []
     assert verdict_violations(STORE, _module(LOOKUP))  # and the store does not read it
 
@@ -310,6 +421,36 @@ def test_the_code_that_proceeds_is_reached_only_from_the_code_that_decided():
 def test_the_seal_proceeds_only_in_the_function_that_decided_it():
     source = (PACKAGE / TRUST).read_text()
     assert functions_referring_to(source, "proceed") == functions_referring_to(source, "decide") == {"_seal"}
+
+
+@pytest.mark.parametrize(
+    "source",
+    ["request_flow.run_system(clock, path)", "from content_boundary_lab.request_flow import run_system\nrun_system()", "r = request_flow.run_system"],
+    ids=["a call", "an import and a call", "an alias"],
+)
+def test_the_guard_sees_every_way_of_reaching_the_system_flow(source):
+    assert callers_of(source, "run_system")
+
+
+def test_only_the_rescan_refers_to_the_transaction_that_runs_as_the_system():
+    """run_system() authenticates and authorises nobody: it is the lab's own act, so only trust.rescan() may start one."""
+    users = [path.relative_to(PACKAGE) for path in sorted(PACKAGE.rglob("*.py")) if callers_of(path.read_text(), "run_system")]
+    assert users == [TRUST]  # request_flow.py defines it; a definition is not a reference
+    assert functions_referring_to((PACKAGE / TRUST).read_text(), "run_system") == {"rescan"}
+
+
+def test_the_system_actor_is_named_only_where_the_rescan_runs():
+    users = [path.relative_to(PACKAGE) for path in sorted(PACKAGE.rglob("*.py")) if callers_of(path.read_text(), "SYSTEM_RESCAN")]
+    assert users == [Path("audit.py"), TRUST]  # audit defines it and checks who may use it; trust.rescan runs under it
+    assert functions_referring_to((PACKAGE / TRUST).read_text(), "SYSTEM_RESCAN") == {"rescan"}
+
+
+def test_acceptance_proceeds_in_one_transaction_and_never_calls_the_scanner_or_a_file():
+    source = (PACKAGE / ACCEPTANCE).read_text()
+    assert not functions_referring_to(source, "proceed") and not functions_referring_to(source, "decide")
+    assert not functions_referring_to(source, "run_system") and not functions_referring_to(source, "open_stored")
+    assert not functions_referring_to(source, "scan") and not file_operations(source)
+    assert not identifiers(source) & {"quarantine_root", "asset_root", "quarantine", "assets", "Scanner"}
 
 
 # --- quarantine and the trusted root ---------------------------------------------------------------------------------------
