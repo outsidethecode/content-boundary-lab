@@ -8,13 +8,21 @@ One request is one SQLite write transaction, in this order:
     4. authenticate the bearer token on that instant (identity.authenticate)
     5. authorise the action in the URL's production on that instant (authz.authorize_engagement)
     6. run the endpoint's operation, which does its work and appends exactly one audit event, on the same instant
-    7. COMMIT, and only then build the response; the connection is closed on every path
+    7. check that exactly one audit event was appended since step 3; if not, roll back and answer 500
+    8. COMMIT, and only then build the response; the connection is closed on every path
 
 An endpoint supplies only the action to authorise and the operation to run (a function of a Context). It never opens a
 connection, begins, commits or rolls back, reads a clock or authenticates: that is this module's job and the order above
 is the property this module exists to keep. The audit events for a failed authentication and a failed authorisation are
-recorded here, so no endpoint can forget them. The calls go through their modules (identity.authenticate,
-authz.authorize_engagement, audit.record_event, store.connect, store.transaction) so that the tests can watch the order.
+recorded here, so no endpoint can forget them, and step 7 makes a forgotten or doubled event of an operation a failed
+request and not a silent gap. The count is exact because the transaction holds the writer lock: no other writer can append
+between steps 3 and 7. The calls go through their modules (identity.authenticate, authz.authorize_engagement,
+audit.record_event, store.connect, store.transaction) so that the tests can watch the order.
+
+A body, for the endpoints that take one, is read before step 1 by read_body(): in the event loop, at most MAX_BODY_BYTES
+(counted on the bytes actually streamed, never on Content-Length), so a slow client cannot hold the writer lock. Reading
+it decides nothing: an oversized body is only flagged, and the operation answers 413 after steps 4 and 5, so the 401 and
+the 403 never depend on the body.
 
 Taking the lock first is what makes a revocation final: a request that begins after a revocation commits cannot have
 started earlier, so it cannot decide on stale data, and the instant it reads cannot pre-date its wait. The cost is
@@ -55,8 +63,13 @@ from content_boundary_lab.settings import TrustedSettings
 
 logger = logging.getLogger(__name__)
 
+MAX_BODY_BYTES = 4096
 _LOCK_CODES = frozenset({sqlite3.SQLITE_BUSY, sqlite3.SQLITE_LOCKED})
 _PRIMARY_CODE_MASK = 0xFF  # an extended SQLite result code keeps its primary code in the low byte
+
+
+class AuditCountError(RuntimeError):
+    """A request did not append exactly one audit event. It is a fault in the operation, never in the caller's input."""
 
 
 class _Snapshot:
@@ -81,11 +94,20 @@ class Decision:
 
 
 @dataclass(frozen=True)
+class RequestBody:
+    """A request body read with a limit: its bytes, or only the fact that it was over the limit (then data is empty)."""
+
+    data: bytes
+    oversized: bool
+
+
+@dataclass(frozen=True)
 class Context:
     """What an operation may use, all of it inside the open transaction and fixed to the one instant of the request.
 
     clock answers that instant for audit.record_event and now_micros is the same instant as an integer; grant is the
-    caller's own authorised engagement in production_id for the action the endpoint named.
+    caller's own authorised engagement in production_id for the action the endpoint named; body is None for an endpoint
+    that takes none.
     """
 
     conn: sqlite3.Connection
@@ -94,9 +116,27 @@ class Context:
     caller: identity.VerifiedIdentity
     grant: authz.AuthorizedEngagement
     production_id: str
+    body: RequestBody | None = None
 
 
 Operation = Callable[[Context], Decision]
+
+
+async def read_body(request: Request) -> RequestBody:
+    """At most MAX_BODY_BYTES of the request body, counted as streamed, and the first chunk past that to notice.
+
+    It runs in the event loop before the handler and touches no database. When the limit is crossed it stops reading
+    and reports the body as oversized, with no data. It decides nothing about the request: answering 413 is for the
+    operation, after authentication and authorisation.
+    """
+    chunks: list[bytes] = []
+    total = 0
+    async for chunk in request.stream():
+        total += len(chunk)
+        if total > MAX_BODY_BYTES:
+            return RequestBody(b"", True)
+        chunks.append(chunk)
+    return RequestBody(b"".join(chunks), False)
 
 
 def _unauthenticated() -> Decision:
@@ -142,6 +182,32 @@ def _authorize(conn: sqlite3.Connection, caller, production_id: str, action: aut
         return denied.reason
 
 
+def deny(
+    ctx: Context,
+    reason: audit.AuditReason,
+    *,
+    object_type: audit.ObjectType | None = None,
+    object_id: str | None = None,
+) -> Decision:
+    """The generic 403 for a target the caller may not act on, recorded as access.denied in the request's transaction.
+
+    For an operation whose target is not in the caller's production, or does not exist, or is malformed: the answer is the
+    same whichever it is, and the reason (a closed code) is for the audit record only. object_id must be a validated id.
+    """
+    audit.record_event(
+        ctx.conn,
+        ctx.clock,
+        audit.AuditAction.ACCESS_DENIED,
+        audit.Outcome.DENIED,
+        actor=ctx.caller.as_actor(),
+        production_id=ctx.production_id,
+        object_type=object_type,
+        object_id=object_id,
+        reason=reason,
+    )
+    return _forbidden()
+
+
 def _decide(
     conn: sqlite3.Connection,
     settings: TrustedSettings,
@@ -151,6 +217,7 @@ def _decide(
     authorization: str | None,
     action: authz.Action,
     operation: Operation,
+    body: RequestBody | None,
 ) -> Decision:
     """Authenticate, authorise, then run the operation, inside the caller's transaction. Nothing is committed here."""
     caller = _authenticate(authorization, settings, snapshot)
@@ -177,7 +244,18 @@ def _decide(
             reason=result,
         )
         return _forbidden()
-    return operation(Context(conn, snapshot, now_micros, caller, result, production_id))
+    return operation(Context(conn, snapshot, now_micros, caller, result, production_id, body))
+
+
+def _audit_baseline(conn: sqlite3.Connection) -> int:
+    return conn.execute("SELECT COALESCE(MAX(seq), 0) FROM audit_events").fetchone()[0]
+
+
+def _check_one_audit_event(conn: sqlite3.Connection, baseline: int) -> None:
+    """Raise unless exactly one event was appended since `baseline`. The writer lock makes the count this request's own."""
+    appended = conn.execute("SELECT COUNT(*) FROM audit_events WHERE seq > ?", (baseline,)).fetchone()[0]
+    if appended != 1:
+        raise AuditCountError(f"a request must append exactly one audit event, found {appended}")
 
 
 def _run(
@@ -188,6 +266,7 @@ def _run(
     authorization: str | None,
     action: authz.Action,
     operation: Operation,
+    body: RequestBody | None,
 ) -> Decision:
     conn = store.connect(database_path)
     try:
@@ -195,7 +274,11 @@ def _run(
             moment = clock.now()  # the only clock read of the request, made while holding the writer lock
             now_micros = to_micros(moment)
             snapshot = _Snapshot(moment)
-            decision = _decide(conn, settings, snapshot, now_micros, production_id, authorization, action, operation)
+            baseline = _audit_baseline(conn)
+            decision = _decide(
+                conn, settings, snapshot, now_micros, production_id, authorization, action, operation, body
+            )
+            _check_one_audit_event(conn, baseline)  # before the commit: a miscount rolls everything back
         return decision  # the transaction has committed
     finally:
         conn.close()
@@ -220,10 +303,11 @@ def handle(
     authorization: str | None,
     action: authz.Action,
     operation: Operation,
+    body: RequestBody | None = None,
 ) -> Response:
     """Run one request through the flow above and build its response, after the transaction has ended."""
     try:
-        decision = _run(settings, clock, database_path, production_id, authorization, action, operation)
+        decision = _run(settings, clock, database_path, production_id, authorization, action, operation, body)
     except Exception as error:  # fail closed: whatever went wrong, no decision is delivered (and it is logged)
         decision = _failed(error)
     # Every answer is personal to the caller, so none of them is to be stored by a cache.

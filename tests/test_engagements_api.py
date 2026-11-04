@@ -11,317 +11,43 @@ import inspect
 import logging
 import sqlite3
 import threading
-from contextlib import contextmanager
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timedelta
 from pathlib import Path
-from urllib.parse import quote
 
 import pytest
 from fastapi.testclient import TestClient
 from support import token_issuer as tokens
+from support.http_lab import (  # the harness (and its fixtures) moved to tests/support/http_lab.py unchanged
+    LONG_END,
+    LOGGER,
+    MICRO_END,
+    OTHER_ISSUER,
+    REAL_CONNECT,
+    SEEDED_AT,
+    SHORT_END,
+    T0,
+    THREAD_WAIT,
+    UTC,
+    Background,
+    FixedClock,
+    Lab,
+    RecordingClock,
+    Spy,
+    assert_released,
+    denial,
+    generic,
+    is_closed,
+    lab,
+    make_lab,
+    observable,
+    spy,
+    transaction_whose_commit_fails,
+    writer_lock,
+)
 
-from content_boundary_lab import audit, authz, engagements, identity, request_flow, store
+from content_boundary_lab import audit, authz, engagements, identity, management, request_flow, store
 from content_boundary_lab.app import Dependencies, create_app
 from content_boundary_lab.clock import to_micros
-
-UTC = timezone.utc
-T0 = datetime(2026, 11, 3, 12, tzinfo=UTC)  # the instant the default test token becomes valid (tokens.NOW)
-SEEDED_AT = T0 - timedelta(days=1)
-LONG_END = T0 + timedelta(days=30)
-SHORT_END = T0 + timedelta(seconds=100)  # inside the default token's five minutes of life
-MICRO_END = LONG_END + timedelta(microseconds=123456)
-OTHER_ISSUER = "https://other-issuer.example"
-GENERIC = {
-    401: {"detail": "Not authenticated"},
-    403: {"detail": "Forbidden"},
-    500: {"detail": "Internal server error"},
-    503: {"detail": "Service unavailable"},
-}
-LOGGER = "content_boundary_lab.request_flow"  # failures are logged by the shared request flow
-REAL_CONNECT = store.connect  # the tests' own connections must not go through the spy
-THREAD_WAIT = 10
-
-
-class FixedClock:
-    def __init__(self, moment: datetime) -> None:
-        self.moment = moment
-
-    def now(self) -> datetime:
-        return self.moment
-
-
-class RecordingClock:
-    """The application's injected clock: counts reads, can advance after each read and can run hooks inside one."""
-
-    def __init__(self, moment: datetime) -> None:
-        self.moment = moment
-        self.step = timedelta(0)
-        self.calls = 0
-        self.hooks: list = []
-
-    def now(self) -> datetime:
-        self.calls += 1
-        for hook in list(self.hooks):
-            hook()
-        moment = self.moment
-        self.moment += self.step
-        return moment
-
-
-class Background:
-    """Run a callable in a thread and collect its result; a failure in the thread is re-raised by join()."""
-
-    def __init__(self, target) -> None:
-        self.result = None
-        self.error: BaseException | None = None
-        self._thread = threading.Thread(target=self._run, args=(target,), daemon=True)
-        self._thread.start()
-
-    def _run(self, target) -> None:
-        try:
-            self.result = target()
-        except BaseException as error:  # reported to the test by join()
-            self.error = error
-
-    @property
-    def running(self) -> bool:
-        return self._thread.is_alive()
-
-    def join(self):
-        self._thread.join(THREAD_WAIT)
-        assert not self._thread.is_alive(), "the background work did not finish"
-        if self.error is not None:
-            raise self.error
-        return self.result
-
-
-class Lab:
-    """One application, its database and its trusted key, with a small cast of subjects and engagements."""
-
-    def __init__(self, directory: Path, name: str = "lab") -> None:
-        self.path = directory / f"{name}.sqlite3"
-        self.key = tokens.new_key("key-1")
-        self.clock = RecordingClock(T0)
-        self.engagements: dict[str, str] = {}
-        store.initialise_schema(self.path)
-        self._seed()
-        self.app = create_app(
-            Dependencies(settings=tokens.trusted_settings(self.key), clock=self.clock, database_path=self.path)
-        )
-        self.client = TestClient(self.app)
-
-    def _seed(self) -> None:
-        seeding = FixedClock(SEEDED_AT)
-        conn = REAL_CONNECT(self.path)
-        try:
-            with store.transaction(conn):
-                self.alpha = store.add_production(conn, seeding, "ALPHA")
-                self.bravo = store.add_production(conn, seeding, "BRAVO")
-                for key, issuer, subject, production, role, ends_at in [
-                    ("vendor", tokens.ISSUER, "vendor-1", self.alpha, "vendor", LONG_END),
-                    ("coordinator", tokens.ISSUER, "coordinator-1", self.alpha, "coordinator", LONG_END),
-                    ("vendor2", tokens.ISSUER, "vendor-2", self.bravo, "vendor", LONG_END),
-                    # the same subject text under another issuer is a different person
-                    ("foreign", OTHER_ISSUER, "vendor-1", self.bravo, "vendor", LONG_END),
-                    ("short", tokens.ISSUER, "short-1", self.alpha, "vendor", SHORT_END),
-                    ("micro", tokens.ISSUER, "micro-1", self.alpha, "vendor", MICRO_END),
-                ]:
-                    subject_id = store.add_subject(conn, seeding, issuer, subject, subject)
-                    self.engagements[key] = store.add_engagement(conn, seeding, subject_id, production, role, ends_at)
-                store.add_subject(conn, seeding, tokens.ISSUER, "outsider-1", "Outsider")  # no engagement
-        finally:
-            conn.close()
-
-    def production(self, name: str) -> str:
-        """A production id, or a derived invalid form of a real one, or the text itself."""
-        derived = {
-            "alpha": self.alpha,
-            "bravo": self.bravo,
-            "ALPHA-UPPER": self.alpha.upper(),
-            "ALPHA-SHORT": self.alpha[:-1],
-            "ALPHA-LONG": self.alpha + "0",
-            "ALPHA-SPACED": " " + self.alpha,
-            "ALPHA-INJECTED": self.alpha + "' OR '1'='1",
-        }
-        return derived.get(name, name)
-
-    def token(self, subject: str = "vendor-1", **claims) -> str:
-        return tokens.mint(self.key, **{"sub": subject, **claims})
-
-    def request(self, method: str, production: str, *, headers=None, params=None):
-        url = f"/productions/{quote(production, safe='')}/engagement"
-        return self.client.request(method, url, headers=headers, params=params)
-
-    def get(self, production: str, subject: str | None = "vendor-1", *, token=None, headers=None, params=None, **claims):
-        """GET with a valid token for `subject` (none if subject is None), or with exactly `token`."""
-        sent = dict(headers or {})
-        if token is None and subject is not None:
-            token = self.token(subject, **claims)
-        if token is not None:
-            sent["Authorization"] = f"Bearer {token}"
-        return self.request("GET", production, headers=sent, params=params)
-
-    def audit_rows(self) -> list[dict]:
-        conn = REAL_CONNECT(self.path)
-        try:
-            return [dict(row) for row in conn.execute("SELECT * FROM audit_events ORDER BY seq")]
-        finally:
-            conn.close()
-
-    def revoke(self, key: str, at: datetime = T0 + timedelta(seconds=1)) -> None:
-        conn = REAL_CONNECT(self.path)
-        try:
-            with store.transaction(conn):
-                assert store.revoke_engagement(conn, FixedClock(at), self.engagements[key])
-        finally:
-            conn.close()
-
-    def make_audit_inserts_fail(self) -> None:
-        """The next audit insert hits the end of the AUTOINCREMENT range, a real SQLite failure, without any schema change."""
-        raw = sqlite3.connect(self.path, isolation_level=None)
-        try:
-            raw.execute("DELETE FROM sqlite_sequence WHERE name = 'audit_events'")
-            raw.execute("INSERT INTO sqlite_sequence (name, seq) VALUES ('audit_events', 9223372036854775807)")
-        finally:
-            raw.close()
-
-
-class Spy:
-    """What the handler did, in order: SQL statements (traced), clock reads, authentication, the clocks it passed on."""
-
-    def __init__(self) -> None:
-        self.events: list[str] = []
-        self.connections: list[sqlite3.Connection] = []
-        self.connect_threads: list[int] = []
-        self.begin_started = threading.Event()
-        self.auth_clocks: list = []
-        self.audit_clocks: list = []
-        self.decision_instants: list[int] = []
-
-
-@pytest.fixture
-def make_lab(tmp_path):
-    labs: list[Lab] = []
-
-    def make(name: str = "lab") -> Lab:
-        labs.append(Lab(tmp_path, name))
-        return labs[-1]
-
-    yield make
-    for lab in labs:
-        lab.client.close()
-
-
-@pytest.fixture
-def lab(make_lab) -> Lab:
-    return make_lab()
-
-
-@pytest.fixture
-def spy(lab, monkeypatch) -> Spy:
-    spy = Spy()
-    real_authenticate, real_authorize, real_record = identity.authenticate, authz.authorize_engagement, audit.record_event
-
-    def trace(statement: str) -> None:
-        if spy.events and spy.events[-1] == statement:
-            return  # SQLite traces a statement again for each trigger it fires (the audit INSERT fires one)
-        spy.events.append(statement)
-        if statement.startswith("BEGIN IMMEDIATE"):
-            spy.begin_started.set()
-
-    def connect(path):
-        conn = REAL_CONNECT(path)
-        spy.connections.append(conn)
-        spy.connect_threads.append(threading.get_ident())
-        conn.set_trace_callback(trace)
-        return conn
-
-    def authenticate(authorization, settings, clock):
-        spy.events.append("AUTHENTICATE")
-        spy.auth_clocks.append(clock)
-        return real_authenticate(authorization, settings, clock)
-
-    def authorize(conn, who, production_id, action, now_micros):
-        spy.decision_instants.append(now_micros)
-        return real_authorize(conn, who, production_id, action, now_micros)
-
-    def record(conn, clock, *args, **kwargs):
-        spy.audit_clocks.append(clock)
-        return real_record(conn, clock, *args, **kwargs)
-
-    lab.clock.hooks.append(lambda: spy.events.append("CLOCK"))
-    monkeypatch.setattr(store, "connect", connect)
-    monkeypatch.setattr(identity, "authenticate", authenticate)
-    monkeypatch.setattr(authz, "authorize_engagement", authorize)
-    monkeypatch.setattr(audit, "record_event", record)
-    return spy
-
-
-def generic(response, status: int) -> None:
-    assert response.status_code == status
-    assert response.json() == GENERIC[status]
-
-
-def observable(response) -> tuple:
-    """Everything a client can see of a response."""
-    return (response.status_code, tuple(sorted(response.headers.items())), response.content)
-
-
-def is_closed(conn: sqlite3.Connection) -> bool:
-    try:
-        conn.execute("SELECT 1")
-    except sqlite3.ProgrammingError:
-        return True
-    return False
-
-
-def assert_released(lab: Lab, spy: Spy) -> None:
-    """Every connection the handler opened is closed and no write transaction is left open."""
-    assert spy.connections and all(is_closed(conn) for conn in spy.connections)
-    probe = sqlite3.connect(lab.path, timeout=0, isolation_level=None)
-    try:
-        probe.execute("BEGIN IMMEDIATE")  # raises "database is locked" if a transaction were still open
-        probe.execute("ROLLBACK")
-    finally:
-        probe.close()
-
-
-@contextmanager
-def transaction_whose_commit_fails(conn: sqlite3.Connection):
-    """A stand-in for store.transaction() whose COMMIT fails: nothing is made durable and the error propagates."""
-    conn.execute("BEGIN IMMEDIATE")
-    try:
-        yield conn
-    except BaseException:
-        conn.rollback()
-        raise
-    conn.rollback()
-    raise sqlite3.OperationalError("disk I/O error")
-
-
-@contextmanager
-def writer_lock(lab: Lab):
-    holder = REAL_CONNECT(lab.path)
-    try:
-        with store.transaction(holder):
-            yield holder
-    finally:
-        holder.close()
-
-
-def denial(subject: str, production_id: str | None, reason: str, *, at: datetime = T0) -> dict:
-    return {
-        "seq": 1,
-        "at": to_micros(at),
-        "actor_issuer": tokens.ISSUER,
-        "actor_subject": subject,
-        "action": "access.denied",
-        "outcome": "denied",
-        "production_id": production_id,
-        "object_type": None,
-        "object_id": None,
-        "reason": reason,
-    }
 
 
 # ----------------------------------------------------------------------------------------------- the fixtures
@@ -726,21 +452,42 @@ def test_the_clock_is_read_exactly_once_per_handled_request(lab, outcome):
 def test_the_clock_is_read_after_the_writer_lock_is_taken_and_before_anything_is_decided(lab, spy):
     assert lab.get(lab.alpha).status_code == 200
     events = spy.events
-    assert events[:3] == ["BEGIN IMMEDIATE", "CLOCK", "AUTHENTICATE"]
+    assert events[:2] == ["BEGIN IMMEDIATE", "CLOCK"]
+    assert events[2].startswith("SELECT COALESCE(MAX(seq), 0) FROM audit_events")  # where the audit count starts
+    assert events[3] == "AUTHENTICATE"
     assert events.count("CLOCK") == events.count("AUTHENTICATE") == events.count("BEGIN IMMEDIATE") == 1
-    assert "FROM engagements" in events[3]
-    assert events[4].startswith("INSERT INTO audit_events")
-    assert events[5:] == ["COMMIT"]
+    assert "FROM engagements" in events[4]
+    assert events[5].startswith("INSERT INTO audit_events")
+    assert events[6].startswith("SELECT COUNT(*) FROM audit_events WHERE seq > ")  # the count check, before the commit
+    assert events[7:] == ["COMMIT"]
 
 
 def test_a_failed_authentication_is_decided_after_the_lock_and_never_queries_engagements(lab, spy):
     assert lab.get(lab.alpha, None).status_code == 401
-    assert [event.split(" ")[0] for event in spy.events] == ["BEGIN", "CLOCK", "AUTHENTICATE", "INSERT", "COMMIT"]
+    assert [event.split(" ")[0] for event in spy.events] == [
+        "BEGIN",
+        "CLOCK",
+        "SELECT",  # the audit count's starting point
+        "AUTHENTICATE",
+        "INSERT",
+        "SELECT",  # the audit count
+        "COMMIT",
+    ]
+    assert not any("FROM engagements" in event for event in spy.events)
 
 
 def test_an_invalid_identifier_is_denied_without_querying_engagements(lab, spy):
     assert lab.get("NOT-AN-ID").status_code == 403
-    assert [event.split(" ")[0] for event in spy.events] == ["BEGIN", "CLOCK", "AUTHENTICATE", "INSERT", "COMMIT"]
+    assert [event.split(" ")[0] for event in spy.events] == [
+        "BEGIN",
+        "CLOCK",
+        "SELECT",
+        "AUTHENTICATE",
+        "INSERT",
+        "SELECT",
+        "COMMIT",
+    ]
+    assert not any("FROM engagements" in event for event in spy.events)
 
 
 def test_one_instant_is_shared_by_authentication_authorisation_and_the_audit_record(lab, spy):
@@ -1000,7 +747,7 @@ def test_the_header_is_added_by_the_handler_and_not_to_the_frameworks_own_answer
 
 
 class Calls:
-    """A stand-in operation that remembers what it was given, and records no audit event of its own."""
+    """A stand-in operation that remembers what it was given and, as every operation must, appends one audit event."""
 
     def __init__(self, decision=None, fail: Exception | None = None) -> None:
         self.contexts: list[request_flow.Context] = []
@@ -1013,6 +760,7 @@ class Calls:
         self.seen.append({"in_transaction": ctx.conn.in_transaction, "instants": [ctx.clock.now(), ctx.clock.now()]})
         if self.fail is not None:
             raise self.fail
+        append_audit_events(ctx, 1)
         return self.decision
 
 
@@ -1036,8 +784,9 @@ def test_the_flow_authorises_the_action_the_endpoint_names(lab):
     refused = run_flow(lab, operation, subject="vendor-1")  # a vendor may view its own engagement, not manage any
     assert refused.status_code == 403 and len(operation.contexts) == 1  # the operation did not run
     assert run_flow(lab, operation, action=authz.Action.VIEW_OWN_ENGAGEMENT, subject="vendor-1").status_code == 200
-    assert [row["reason"] for row in lab.audit_rows()] == ["role_not_permitted"]
-    assert lab.audit_rows()[0]["actor_subject"] == "vendor-1"
+    denials = [row for row in lab.audit_rows() if row["action"] == "access.denied"]
+    assert [(row["reason"], row["actor_subject"]) for row in denials] == [("role_not_permitted", "vendor-1")]
+    assert len(lab.audit_rows()) == 3  # the operation's own event twice, and the flow's denial between them
 
 
 @pytest.mark.parametrize("subject", [None, "outsider-1"], ids=["no credentials", "no engagement"])
@@ -1077,6 +826,57 @@ def test_an_operation_that_fails_rolls_back_the_whole_request_and_gives_a_generi
     assert [record.name for record in caplog.records] == [LOGGER] and caplog.records[0].exc_info is not None
 
 
+def append_audit_events(ctx: request_flow.Context, times: int) -> None:
+    for _ in range(times):
+        audit.record_event(
+            ctx.conn, ctx.clock, audit.AuditAction.ENGAGEMENT_VIEWED, audit.Outcome.ALLOWED, actor=ctx.caller.as_actor()
+        )
+
+
+@pytest.mark.parametrize("times", [0, 2, 3], ids=["none", "two", "three"])
+def test_an_operation_that_appends_no_or_several_audit_events_is_rolled_back_with_a_generic_500(lab, spy, caplog, times):
+    def revokes_and_audits_wrongly(ctx):
+        store.revoke_engagement_in_production(ctx.conn, ctx.production_id, lab.engagements["vendor"], ctx.now_micros)
+        append_audit_events(ctx, times)
+        return request_flow.Decision(200, {"done": "yes"})
+
+    before = lab.engagement_rows()
+    with caplog.at_level(logging.ERROR, logger=LOGGER):
+        response = run_flow(lab, revokes_and_audits_wrongly)
+    assert response.status_code == 500 and response.body == b'{"detail":"Internal server error"}'
+    assert response.headers["cache-control"] == "no-store"
+    assert lab.audit_rows() == []  # the events it did append went with the rollback
+    assert lab.engagement_rows() == before  # and so did the state change
+    assert "ROLLBACK" in spy.events and "COMMIT" not in spy.events
+    [record] = caplog.records
+    assert record.exc_info[0] is request_flow.AuditCountError
+    assert str(record.exc_info[1]) == f"a request must append exactly one audit event, found {times}"
+    assert_released(lab, spy)
+
+
+def test_an_operation_that_appends_exactly_one_audit_event_commits_with_its_change(lab, spy):
+    def revokes_and_audits(ctx):
+        store.revoke_engagement_in_production(ctx.conn, ctx.production_id, lab.engagements["vendor"], ctx.now_micros)
+        append_audit_events(ctx, 1)
+        return request_flow.Decision(200, {"done": "yes"})
+
+    assert run_flow(lab, revokes_and_audits).status_code == 200
+    assert len(lab.audit_rows()) == 1
+    assert [row[6] for row in lab.engagement_rows() if row[0] == lab.engagements["vendor"]] == [to_micros(T0)]
+    assert spy.events[-1] == "COMMIT" and "ROLLBACK" not in spy.events
+
+
+def test_the_audit_count_ignores_events_from_earlier_requests(lab):
+    assert lab.get(lab.alpha).status_code == 200  # an earlier request leaves one event behind
+
+    def audits_once(ctx):
+        append_audit_events(ctx, 1)
+        return request_flow.Decision(200, {"done": "yes"})
+
+    assert run_flow(lab, audits_once).status_code == 200  # counted from this request's own starting point
+    assert len(lab.audit_rows()) == 2
+
+
 def test_the_flow_adds_no_store_to_the_operations_answer_and_keeps_its_own_headers(lab):
     operation = Calls(request_flow.Decision(201, {"created": "yes"}, {"X-Example": "kept"}))
     response = run_flow(lab, operation)
@@ -1101,9 +901,13 @@ def test_two_applications_share_no_state(make_lab):
     assert [row["action"] for row in second.audit_rows()] == ["access.denied", "access.denied", "engagement.viewed"]
 
 
-def test_the_application_registers_only_the_engagement_route_and_serves_no_documentation(lab):
+def test_the_application_registers_only_the_approved_routes_and_serves_no_documentation(lab):
     paths = {getattr(route, "path", None) for route in lab.app.routes}
-    assert paths == {"/productions/{production_id:path}/engagement"}
+    assert paths == {  # the GET, and the two coordinator-management routes (their own tests are in the next two files)
+        "/productions/{production_id:path}/engagement",
+        "/productions/{production_id:path}/engagements",
+        "/productions/{production_id:path}/engagements/{engagement_id:path}/revoke",
+    }
     for path in ("/docs", "/redoc", "/openapi.json", "/"):
         assert lab.client.get(path).status_code == 404
 
@@ -1150,7 +954,18 @@ def test_the_endpoint_module_does_none_of_the_flow_itself():
     assert "request_flow" in imported_names  # it hands the request to the shared flow
 
 
-@pytest.mark.parametrize("module", [request_flow, engagements], ids=["request_flow", "engagements"])
+def test_the_management_module_does_none_of_the_flow_itself_though_it_may_run_its_own_selects():
+    tree = _source(management)
+    assert not (FLOW_ONLY - {"execute"}) & set(_attributes(tree))  # it reads subjects and engagements through ctx.conn
+    assert not TIME_SOURCES & set(_attributes(tree))
+    assert not {"time", "os", "sys", "sqlite3"} & _imports(tree)
+    imported_names = {alias.name for node in ast.walk(tree) if isinstance(node, ast.ImportFrom) for alias in node.names}
+    assert "request_flow" in imported_names
+
+
+@pytest.mark.parametrize(
+    "module", [request_flow, engagements, management], ids=["request_flow", "engagements", "management"]
+)
 def test_the_module_keeps_no_mutable_global_state(module):
     tree = _source(module)
     assert not [node for node in ast.walk(tree) if isinstance(node, (ast.Global, ast.Nonlocal))]

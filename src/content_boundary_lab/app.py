@@ -5,7 +5,7 @@ from pathlib import Path
 
 from fastapi import FastAPI
 
-from content_boundary_lab import engagements
+from content_boundary_lab import engagements, management
 from content_boundary_lab.clock import Clock
 from content_boundary_lab.settings import TrustedSettings
 
@@ -39,5 +39,15 @@ def create_app(deps: Dependencies) -> FastAPI:
         engagements.PATH,
         engagements.build_endpoint(deps.settings, deps.clock, deps.database_path),
         methods=["GET"],
+    )
+    app.add_api_route(
+        management.CREATE_PATH,
+        management.build_create_endpoint(deps.settings, deps.clock, deps.database_path),
+        methods=["POST"],
+    )
+    app.add_api_route(
+        management.REVOKE_PATH,
+        management.build_revoke_endpoint(deps.settings, deps.clock, deps.database_path),
+        methods=["POST"],
     )
     return app

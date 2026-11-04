@@ -26,6 +26,8 @@ class AuditAction(StrEnum):
 
     ENGAGEMENT_CREATED = "engagement.created"
     ENGAGEMENT_REVOKED = "engagement.revoked"
+    ENGAGEMENT_REVOKE_REPEATED = "engagement.revoke_repeated"  # a repeat of a revocation: nothing was changed
+    ENGAGEMENT_REQUEST_REJECTED = "engagement.request_rejected"  # an authorised request refused as invalid or a duplicate
     ENGAGEMENT_VIEWED = "engagement.viewed"
     ACCESS_DENIED = "access.denied"
     ASSET_READ = "asset.read"
@@ -41,6 +43,9 @@ class AuditReason(StrEnum):
     NOT_FOUND_OR_FORBIDDEN = "not_found_or_forbidden"  # one code for both, so the record does not distinguish them
     INVALID_IDENTIFIER = "invalid_identifier"
     INVALID_CREDENTIALS = "invalid_credentials"  # a failed authentication; the AuthFailure detail is not recorded
+    INVALID_REQUEST = "invalid_request"  # a body or field that failed validation; which one, and its text, are not recorded
+    ENGAGEMENT_EXISTS = "engagement_exists"  # the subject already has an engagement in the production, in any state
+    PAYLOAD_TOO_LARGE = "payload_too_large"  # a body over the limit; its size and content are not recorded
 
 
 class ObjectType(StrEnum):

@@ -1,4 +1,4 @@
-"""Application factory checks: explicit dependencies, one registered route, no served documentation."""
+"""Application factory checks: explicit dependencies, the approved routes only, no served documentation."""
 
 import dataclasses
 import inspect
@@ -15,7 +15,11 @@ from content_boundary_lab.clock import SystemClock
 
 # A slice that adds a route must add it here, in the same change.
 ALLOWED_ROUTES: frozenset[tuple[str, frozenset[str]]] = frozenset(
-    {("/productions/{production_id:path}/engagement", frozenset({"GET"}))}
+    {
+        ("/productions/{production_id:path}/engagement", frozenset({"GET"})),
+        ("/productions/{production_id:path}/engagements", frozenset({"POST"})),
+        ("/productions/{production_id:path}/engagements/{engagement_id:path}/revoke", frozenset({"POST"})),
+    }
 )
 UNSERVED_PATHS = ["/", "/docs", "/docs/oauth2-redirect", "/redoc", "/openapi.json"]
 KEY = tokens.new_key("key-1")
@@ -105,7 +109,7 @@ def test_create_app_returns_a_fastapi_app(app):
     assert isinstance(app, FastAPI)
 
 
-def test_only_the_engagement_route_is_registered(app):
+def test_only_the_approved_routes_are_registered(app):
     assert _exposed_routes(app) == ALLOWED_ROUTES
 
 
@@ -132,8 +136,12 @@ def test_openapi_and_documentation_urls_are_disabled(app):
     assert (app.openapi_url, app.docs_url, app.redoc_url) == (None, None, None)
 
 
-def test_openapi_schema_describes_only_the_engagement_route(app):
-    assert set(app.openapi()["paths"]) == {"/productions/{production_id}/engagement"}
+def test_openapi_schema_describes_only_the_approved_routes(app):
+    assert set(app.openapi()["paths"]) == {
+        "/productions/{production_id}/engagement",
+        "/productions/{production_id}/engagements",
+        "/productions/{production_id}/engagements/{engagement_id}/revoke",
+    }
 
 
 def test_no_dependency_overrides_are_configured(app):
