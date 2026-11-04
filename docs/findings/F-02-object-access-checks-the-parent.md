@@ -73,6 +73,34 @@ the URL and the asset's owner is not enforced.
 `tests/findings/test_f02_object_scope.py::test_a_naive_fix_that_checks_the_assets_own_production_but_not_the_url_still_leaks_to_a_caller_engaged_in_both`
 shows it.
 
+### Remediation matrix
+
+[labs/f02_parent_check/matrix.py](../../labs/f02_parent_check/matrix.py) runs fourteen attempts against four applications:
+the reference (R), the seeded variant (V), the naive fix above (N1) and a different, complete fix (A1) that requires the asset
+to belong to the production the request named. Verbatim from [docs/evidence/f02-matrix.txt](../evidence/f02-matrix.txt).
+
+```text
+row  kind        R    V    N1   A1   what
+L1   legitimate  yes  yes  yes  yes  an ALPHA vendor reads ALPHA's asset through the ALPHA url
+L4   legitimate  yes  yes  yes  yes  a vendor engaged in both reads each asset through its own production's url
+X1   exploit     yes  NO   yes  yes  the original exploit: an ALPHA-only vendor asks for BRAVO's asset through the ALPHA url
+X4   exploit     yes  NO   NO   yes  a vendor engaged in BOTH asks for BRAVO's asset through the ALPHA url
+X5   exploit     yes  NO   NO   yes  a vendor engaged in BOTH asks for ALPHA's asset through the BRAVO url
+B2   boundary    yes  NO   yes  yes  a refusal is byte-identical to the answer for an asset that does not exist
+B4   boundary    yes  yes  yes  yes  a revoked vendor is refused its own production's asset
+R   fails: none  [as expected]
+V   fails: X1, X2, X3, X4, X5, B2  [as expected]
+N1  fails: X4, X5  [as expected]
+A1  fails: none  [as expected]
+```
+
+What it shows. The reference holds every row, including every legitimate read, and the original exploit (X1) is blocked. N1
+passes X1 and fails only X4 and X5: it repairs every caller engaged in one production, which is why it looks fixed, and fails
+the callers engaged in both, because the asset's production was never bound to the production that was authorised. A1 passes
+every row, so the matrix measures the security condition (an asset is served only through the production that owns it, and a
+refusal reveals nothing about whether it exists) and not the reference's wording. The audit assertions are in
+`tests/findings/test_audit_assertions.py::test_a_denied_cross_production_read_records_one_denial_and_no_successful_read`.
+
 ## 6. Before and after results
 
 Verbatim from [docs/evidence/f02.txt](../evidence/f02.txt) (lines elided with … are in the file).

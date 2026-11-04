@@ -73,6 +73,34 @@ cache, keyed on the server's digest and the scanner's exact identity and policy.
 corruption in transit. Scanner errors, timeouts and unsupported types fail closed, and every verdict records the scanner's
 identity and version.
 
+### Remediation matrix
+
+[labs/f03_declared_identity/matrix.py](../../labs/f03_declared_identity/matrix.py) runs eleven attempts against three
+applications: the reference (R), the seeded variant (V), and a naive fix (N1) that keeps the vendor's declared digest as the
+identity and adds a check that the cache entry found belongs to that digest. Verbatim from
+[docs/evidence/f03-matrix.txt](../evidence/f03-matrix.txt).
+
+```text
+row  kind        R    V    N1   what
+L2   legitimate  yes  yes  yes  the same clean file delivered again is not scanned again: the cache is reused, and the event says so
+L4   legitimate  yes  yes  yes  after the verdict's 24 hours the same clean file is scanned again, and the event says so
+X1   exploit     yes  NO   NO   the original exploit: a marker file declared with a cached clean file's digest is not passed, and is not scanned
+X2   exploit     yes  NO   NO   it is rejected as checksum_mismatch, before the cache is consulted: no verdict, no reuse
+X3   boundary    yes  yes  yes  the same, declaring the clean file's size as well
+X4   boundary    yes  yes  yes  the same, declaring the digest of a clean file that was never scanned
+R   fails: none  [as expected]
+V   fails: X1, X2  [as expected]
+N1  fails: X1, X2  [as expected]
+```
+
+What it shows. The cache is a legitimate optimisation and the reference keeps it (L2: the same file again is reused, and the
+event is `delivery.verdict_reused`, not a scan; L4: after the verdict's life it is scanned again). N1 fails the same rows as
+the seeded variant: the entry always belongs to the digest it was looked up by, so the check cannot fail while that digest is
+still the vendor's claim. It is the calculation of the digest from the stored bytes, before the cache, that fixes the finding.
+Rows X3 and X4 pass in every variant and show what the exploit needs: the attacker must also match the size, and the digest
+must already be in the cache. The audit assertions are in
+`tests/findings/test_audit_assertions.py::test_a_cache_reuse_is_recorded_as_a_reuse_and_a_new_scan_as_a_scan`.
+
 ## 6. Before and after results
 
 Verbatim from [docs/evidence/f03.txt](../evidence/f03.txt) (lines elided with … are in the file).

@@ -11,3 +11,5 @@ ID = "F-02"
 TITLE = "Object access checks the parent, not the child"
 SCENARIO = "a vendor engaged only in ALPHA asks for a BRAVO asset through the ALPHA url"
 SEAM = seam(ID, assets, "get_asset_in_scope", vulnerable.get_asset_in_scope)
+
+from labs.f02_parent_check import matrix, naive  # noqa: E402,F401  (after SEAM: the matrix builds on it)

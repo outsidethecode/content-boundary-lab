@@ -81,6 +81,43 @@ reading, and refuses a missing, revoked or ended engagement or a role the action
 nothing the application believes about permissions, and are capped at ten minutes. The end date of an engagement is mandatory
 and capped.
 
+### Remediation matrix
+
+[labs/f06_stale_authorisation/matrix.py](../../labs/f06_stale_authorisation/matrix.py) runs twenty attempts against four
+applications: the reference (R), the seeded variant (V), and two naive fixes. N1 checks the token again for validity and still
+believes its claim. N2 reads the engagement store on every request and honours a revocation but forgets that an engagement also
+ends. The boundary rows use an injected clock and the exact instants (one microsecond before the end date, the end date itself,
+one microsecond after); the T rows damage the token in the ways M0 lists (algorithm none, another key, another issuer or
+audience, expired, not yet valid, a spoofed identity header). Verbatim from
+[docs/evidence/f06-matrix.txt](../evidence/f06-matrix.txt).
+
+```text
+row  kind        R    V    N1   N2   what
+L4   legitimate  yes  NO   NO   yes  authorisation does not depend on the token's claims: a token with none still works
+L5   legitimate  yes  yes  yes  yes  the last instant of an engagement (one microsecond before its end) is served
+X1   exploit     yes  NO   NO   yes  the original exploit: the same token, the first request after the revocation
+X3   boundary    yes  NO   NO   NO   exactly at the end date (now = ends_at) the engagement is over
+X4   boundary    yes  NO   NO   NO   one microsecond after the end date it is still over
+X6   boundary    yes  NO   NO   yes  a token whose claim names a higher role grants nothing: the role comes from the store
+X7   boundary    yes  yes  yes  yes  a delivery uploaded before the revocation cannot be sealed after it
+T1   boundary    yes  yes  yes  yes  a token with the algorithm 'none' is a 401
+T5   boundary    yes  yes  yes  yes  an expired token is a 401
+T7   boundary    yes  yes  yes  yes  a valid vendor token with a coordinator's name in a header acts as the vendor
+R   fails: none  [as expected]
+V   fails: L4, X1, X2, X3, X4, X5, X6  [as expected]
+N1  fails: L4, X1, X2, X3, X4, X5, X6  [as expected]
+N2  fails: X3, X4  [as expected]
+```
+
+What it shows. Validating a JWT's signature and expiry does not prove that an engagement granted earlier is still active: N1
+fails exactly the rows the seeded variant fails, because the reference's verifier has already refused every invalid token and
+re-checking it adds nothing. N2 does consult the store and is right on the first request after a revocation (X1 holds), and is
+wrong at the end date and after it (X3, X4): only the exact-boundary rows tell it from the reference, and L5 shows that the
+last instant before the end date is still served. The seeded variant also fails L4, a legitimate row: it refuses a token that
+carries no claim, so its authority is the claim and not the engagement. The T rows hold in every variant, which is why F-06
+is a finding about authorisation and not about the verifier. The audit assertions are in
+`tests/findings/test_audit_assertions.py::test_a_revoked_vendors_denied_requests_are_recorded_with_who_where_and_why`.
+
 ## 6. Before and after results
 
 Verbatim from [docs/evidence/f06.txt](../evidence/f06.txt) (lines elided with … are in the file).

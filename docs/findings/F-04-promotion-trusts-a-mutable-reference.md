@@ -69,6 +69,44 @@ digest; the staged file is then published by a no-clobber link and the state mov
 its audit event. On a mismatch the staged file is removed, nothing is published, the delivery ends in `INTEGRITY_FAILED` and
 an event records it. The protocol and its crash recovery are in [architecture.md](../architecture.md) section 6.
 
+### Remediation matrix
+
+[labs/f04_unverified_promotion/matrix.py](../../labs/f04_unverified_promotion/matrix.py) runs eleven attempts against four
+applications: the reference (R), the seeded variant (V), and two naive fixes. N1 compares the size that was accepted with the
+size of the quarantined file and never hashes the bytes. N2 hashes the file and compares the digest in one pass and then
+copies it in a second. Every row that changes the quarantined object writes to it directly, which is the finding's assumed
+capability. Verbatim from [docs/evidence/f04-matrix.txt](../evidence/f04-matrix.txt).
+
+```text
+row  kind        R    V    N1   N2   what
+L1   legitimate  yes  yes  yes  yes  the accepted bytes are promoted, and the asset served is exactly them
+X1   exploit     yes  NO   NO   yes  the original exploit: bytes of the same length, swapped after acceptance, are refused and nothing is published
+X2   boundary    yes  NO   yes  yes  a shorter substitution is refused and nothing is published
+X3   boundary    yes  NO   yes  yes  a longer substitution is refused and nothing is published
+X5   boundary    yes  yes  yes  yes  a link to a file with the same bytes is refused and nothing is published
+X7   boundary    yes  yes  yes  yes  baseline: the API refuses a write after the seal (409) and the quarantined bytes are unchanged
+X8   boundary    yes  yes  yes  NO   a change between a first full read and a second read of the file publishes nothing but the accepted bytes
+R   fails: none  [as expected]
+V   fails: X1, X2, X3, X4  [as expected]
+N1  fails: X1  [as expected]
+N2  fails: X8  [as expected]
+```
+
+What it shows. N1 compares records with records and the file's size, and so refuses every substitution of another length and
+none of the same length: comparing the accepted digest with another database digest, or with a number from the file system,
+is not a check on the copied bytes. N2 is the verify-then-use pattern: it refuses every substitution that is already there when
+it hashes, and publishes one that arrives between the check and the copy, which is the time-of-check to time-of-use weakness
+(CWE-367) the finding is named for. N2 is exploitable only because its second pass **suppresses a safeguard the application
+already has**: every pass over a quarantined file ends by checking that the file is unchanged, and raises `QuarantineChanged`
+if it was rewritten in place. A two-pass copy that let that error propagate would fail closed on the swap in X8, and the
+delivery would stay `PROMOTING`. N2 catches the error and carries on, as the reference's single-pass copy is entitled to do
+because it judges the bytes it wrote and not the file's history. So the second pass alone does not defeat the safeguards:
+checking one read and using another, and ignoring the change that was reported between them, does. The reference reads the
+quarantined file once and hashes the bytes as it writes them, so there is no second read for a change to hide behind (X8). A link, a deleted file and a write after the seal (X5 to X7) are
+refused in every variant: they are the baseline, not the finding. The audit assertions are in
+`tests/findings/test_audit_assertions.py::test_a_refused_promotion_records_the_refusal_and_never_a_publication` and
+`tests/findings/test_audit_assertions.py::test_a_promotion_whose_publication_cannot_be_audited_publishes_nothing_and_stays_promoting`.
+
 ## 6. Before and after results
 
 Verbatim from [docs/evidence/f04.txt](../evidence/f04.txt) (lines elided with … are in the file).

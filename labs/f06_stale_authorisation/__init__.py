@@ -12,3 +12,5 @@ ID = "F-06"
 TITLE = "Authorisation snapshot in a long-lived token"
 SCENARIO = "a vendor's signed token stays good after its engagement is revoked, or has ended"
 SEAM = seam(ID, authz, "authorize_engagement", vulnerable.authorize_engagement)
+
+from labs.f06_stale_authorisation import matrix, naive  # noqa: E402,F401  (after SEAM: the matrix builds on it)

@@ -62,6 +62,10 @@ class LabClock:
     def advance(self, seconds: int) -> None:
         self._now += timedelta(seconds=seconds)
 
+    def set(self, moment: datetime) -> None:
+        """Move the clock to an exact instant (the boundary rows of the matrices use microseconds)."""
+        self._now = moment
+
 
 class CountingScanner:
     """The shipped synthetic scanner, with a count of how many times it was asked."""
@@ -115,6 +119,8 @@ class World:
         self.production: dict[str, str] = {}
         self.engagement: dict[tuple[str, str], str] = {}
         self.asset: dict[str, str] = {}
+        self.replies: list[Reply] = []  # every response this world has given, for the tests that look for what must not be in one
+        self.tokens: list[str] = []  # and every token it has issued
         self._seed()
         deps = Dependencies(
             settings=self.settings,
@@ -160,13 +166,17 @@ class World:
         """The `productions` claim the stand-in identity provider bakes into a token: production id -> role, as of now."""
         return {self.production[key]: role for key, role in PEOPLE[who][1].items()}
 
-    def token(self, who: str, *, claims: dict | None = None, lifetime: int = LIFETIME) -> str:
-        """A correctly signed ES256 token for `who`, valid from now for `lifetime` seconds (at most what the reference accepts)."""
+    def token(self, who: str, *, claims: dict | None = None, lifetime: int = LIFETIME, key=None) -> str:
+        """A correctly signed ES256 token for `who`, valid from now for `lifetime` seconds (at most what the reference accepts).
+
+        `claims` overrides members of the payload (the matrices damage a token this way) and `key` signs with another key.
+        """
         now = int(self.clock.now().timestamp())
         body = {"iss": ISSUER, "sub": self.subject(who), "aud": AUDIENCE, "iat": now, "nbf": now, "exp": now + lifetime}
         body["productions"] = self.granted(who)
         body.update(claims or {})
-        return jwt.encode(body, self._key, algorithm="ES256", headers={"kid": KID, "typ": "at+jwt"})
+        self.tokens.append(jwt.encode(body, key or self._key, algorithm="ES256", headers={"kid": KID, "typ": "at+jwt"}))
+        return self.tokens[-1]
 
     # --- requests ----------------------------------------------------------------------------------------------------------
 
@@ -174,8 +184,10 @@ class World:
         headers = {}
         if token is not None or who is not None:
             headers["Authorization"] = f"Bearer {token or self.token(who)}"
+        headers |= options.pop("headers", {})
         reply = self.client.request(method, path, headers=headers, **options)
-        return Reply(reply.status_code, reply.content, dict(reply.headers))
+        self.replies.append(Reply(reply.status_code, reply.content, dict(reply.headers)))
+        return self.replies[-1]
 
     def asset_path(self, production: str, asset: str) -> str:
         return f"/productions/{self.production[production]}/assets/{self.asset.get(asset, asset)}"
@@ -248,6 +260,15 @@ class World:
             "SELECT action, outcome, reason, actor_issuer, actor_subject, production_id, object_type, object_id, engine_kind "
             "FROM audit_events ORDER BY seq"
         )
+
+    def break_audit(self) -> None:
+        """From now on every audit insert fails (a real SQLite failure, the AUTOINCREMENT range is used up): nothing can be audited."""
+        raw = sqlite3.connect(self.database, isolation_level=None)
+        try:
+            raw.execute("DELETE FROM sqlite_sequence WHERE name = 'audit_events'")
+            raw.execute("INSERT INTO sqlite_sequence (name, seq) VALUES ('audit_events', 9223372036854775807)")
+        finally:
+            raw.close()
 
     def stored_file(self, delivery: str) -> Path:
         return self.quarantine / self.delivery_row(delivery)["storage_key"]

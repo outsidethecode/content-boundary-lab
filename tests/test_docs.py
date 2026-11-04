@@ -28,7 +28,8 @@ from content_boundary_lab import audit, runner, scanner, store
 
 ROOT = Path(__file__).resolve().parents[1]
 FINDING_PAGES = sorted((ROOT / "docs" / "findings").glob("F-*.md"))  # M2: one page per seeded finding
-EVIDENCE = sorted((ROOT / "docs" / "evidence").glob("f*.txt"))
+EVIDENCE = sorted((ROOT / "docs" / "evidence").glob("f??.txt"))  # one run of a scenario against both variants
+MATRIX_EVIDENCE = sorted((ROOT / "docs" / "evidence").glob("f??-matrix.txt"))  # M3: one remediation matrix
 LABS_README = ROOT / "labs" / "README.md"
 DOCS = [ROOT / "docs" / name for name in ("architecture.md", "threat-model.md", "references.md", "claims.md")] + FINDING_PAGES
 README = ROOT / "README.md"
@@ -241,6 +242,7 @@ FIXED_SENTENCE = "Every vulnerability here is deliberately constructed for educa
 def test_there_is_one_page_and_one_evidence_file_for_each_of_the_four_findings():
     assert [page.name.split("-")[1] for page in FINDING_PAGES] == ["02", "03", "04", "06"]
     assert [path.name for path in EVIDENCE] == ["f02.txt", "f03.txt", "f04.txt", "f06.txt"]
+    assert [path.name for path in MATRIX_EVIDENCE] == ["f02-matrix.txt", "f03-matrix.txt", "f04-matrix.txt", "f06-matrix.txt"]
 
 
 @pytest.mark.parametrize("page", FINDING_PAGES, ids=lambda page: page.name[:4])
@@ -273,13 +275,30 @@ def test_the_results_in_a_finding_page_are_lines_of_its_evidence_file(page):
     assert len(quoted) >= 8 and [line for line in quoted if line not in evidence] == []
 
 
-@pytest.mark.parametrize("path", EVIDENCE, ids=lambda path: path.name)
+@pytest.mark.parametrize("path", [*EVIDENCE, *MATRIX_EVIDENCE], ids=lambda path: path.name)
 def test_an_evidence_file_records_when_how_and_on_what_it_was_made_and_ends_with_the_result(path):
     body = text(path)
     for field in ("date     ", "command  ", "commit   ", "python   ", "pinned   ", "status   PROVISIONAL", "note     "):
         assert re.search(rf"^{field}", body, re.MULTILINE), field
     assert "pinned   fastapi==" in body and FIXED_SENTENCE in body
-    assert body.rstrip().endswith("RESULT     seeded variant exploited: YES   reference blocked: YES")
+    ending = (
+        "RESULT     every variant fails exactly the rows it is expected to: YES"
+        if path in MATRIX_EVIDENCE
+        else "RESULT     seeded variant exploited: YES   reference blocked: YES"
+    )
+    assert body.rstrip().endswith(ending)
+
+
+@pytest.mark.parametrize("page", FINDING_PAGES, ids=lambda page: page.name[:4])
+def test_the_matrix_in_a_finding_page_is_lines_of_its_matrix_evidence_and_names_the_naive_fix(page):
+    body = text(page)
+    number = re.search(r"\]\(\.\./evidence/(f\d\d)\.txt\)", body).group(1)
+    evidence = set(text(ROOT / "docs" / "evidence" / f"{number}-matrix.txt").splitlines())
+    corrected = body.split("## 5. Corrected code")[1].split("## 6.")[0]
+    assert "### Remediation matrix" in corrected and f"{number}-matrix.txt" in corrected
+    quoted = [line for line in corrected.split("```text")[1].split("```")[0].splitlines() if line.strip()]
+    assert len(quoted) >= 8 and [line for line in quoted if line not in evidence] == []
+    assert re.search(r"\bN1\b", corrected) and "fails" in corrected  # a naive fix, and the rows it fails, are named
 
 
 def test_the_labs_readme_lists_exactly_the_labs_that_exist_each_with_its_write_up():

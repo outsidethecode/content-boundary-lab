@@ -14,6 +14,7 @@ import asyncio
 import base64
 import json
 import os
+import re
 import socket
 import subprocess
 import sys
@@ -152,6 +153,20 @@ def test_a_vulnerable_module_is_tiny_names_itself_and_defines_one_function(findi
         node.module for node in ast.walk(tree) if isinstance(node, ast.ImportFrom) and node.module
     }
     assert not [name for name in imported if name.startswith("labs.f0") or name.endswith("scenario")]  # no finding imports another
+
+
+@pytest.mark.parametrize("finding", FINDINGS, ids=ids)
+def test_a_naive_fix_module_is_small_names_itself_as_incomplete_and_imports_no_other_finding(finding):
+    """The partial fixes of M3 are as isolated as the seeded twins: under labs/, banner-marked, and independent of each other."""
+    path = ROOT / "labs" / finding.__name__.split(".")[-1] / "naive.py"
+    source = path.read_text()
+    tree = ast.parse(source)
+    docstring = ast.get_docstring(tree) or ""
+    assert re.search(r"NAIVE FIX(ES)?, INCOMPLETE", docstring) and SENTENCE in docstring and finding.ID in docstring
+    assert len(source.splitlines()) <= 60
+    imported = {node.module for node in ast.walk(tree) if isinstance(node, ast.ImportFrom) and node.module}
+    assert not [name for name in imported if name.startswith("labs.f0") or name.endswith("scenario") or name.endswith("matrix")]
+    assert all(isinstance(node, (ast.Expr, ast.Import, ast.ImportFrom, ast.FunctionDef, ast.Assign)) for node in tree.body)  # no side effects
 
 
 OTHERS = [(applied_one, tried) for applied_one in FINDINGS for tried in FINDINGS if applied_one is not tried]

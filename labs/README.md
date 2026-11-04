@@ -20,6 +20,11 @@ ends. There is no flag, no persistent patch and no second seam.
 | F-04 | Promotion trusts a mutable reference, not the accepted bytes | `promotion.copy_verified` | [f04_unverified_promotion](f04_unverified_promotion/vulnerable.py) | [F-04](../docs/findings/F-04-promotion-trusts-a-mutable-reference.md) |
 | F-06 | Authorisation snapshot in a long-lived token | `authz.authorize_engagement` | [f06_stale_authorisation](f06_stale_authorisation/vulnerable.py) | [F-06](../docs/findings/F-06-authorisation-snapshot-in-a-long-lived-token.md) |
 
+Each finding package also holds the **partial fixes** that M3 shows to be incomplete (`naive.py`, banner-marked
+"NAIVE FIX, INCOMPLETE") and `matrix.py`, the remediation matrix that runs the original exploit, the behaviour that must keep
+working and the alternate and boundary attempts against the reference, the seeded variant, those partial fixes and, for F-02,
+a different complete fix. A partial fix is applied only for the length of one row, exactly as a seeded twin is.
+
 F-01 and F-05 are optional in the design and are not built.
 
 ## Run a finding
@@ -32,6 +37,7 @@ reference blocked it.
 python -m labs                      # all four, and a summary
 python -m labs.f02_parent_check     # one finding
 python -m labs --evidence docs/evidence   # also write docs/evidence/fNN.txt under a header (date, command, commit, versions)
+python -m labs.matrix               # the four remediation matrices (M3); --evidence docs/evidence writes fNN-matrix.txt
 pytest tests/findings -v            # the same scenarios as tests, plus the isolation proof
 ```
 

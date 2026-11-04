@@ -11,3 +11,5 @@ ID = "F-04"
 TITLE = "Promotion trusts a mutable reference, not the accepted bytes"
 SCENARIO = "quarantined bytes are replaced, at the same length, after the coordinator accepted their digest"
 SEAM = seam(ID, promotion, "copy_verified", vulnerable.copy_verified)
+
+from labs.f04_unverified_promotion import matrix, naive  # noqa: E402,F401  (after SEAM: the matrix builds on it)
