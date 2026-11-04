@@ -586,7 +586,14 @@ def test_a_request_that_cannot_get_the_lock_is_a_generic_503_that_decides_nothin
 
 def test_a_database_that_cannot_be_opened_is_a_generic_500_without_the_path(tmp_path, caplog):
     missing = tmp_path / "does-not-exist.sqlite3"
-    app = create_app(Dependencies(settings=tokens.trusted_settings(tokens.new_key()), clock=FixedClock(T0), database_path=missing))
+    app = create_app(
+        Dependencies(
+            settings=tokens.trusted_settings(tokens.new_key()),
+            clock=FixedClock(T0),
+            database_path=missing,
+            asset_root=tmp_path / "assets",
+        )
+    )
     with TestClient(app) as client, caplog.at_level(logging.ERROR, logger=LOGGER):
         response = client.get(f"/productions/{'0' * 32}/engagement")
     generic(response, 500)
@@ -716,6 +723,7 @@ def test_a_500_from_an_unopenable_database_is_not_to_be_stored(tmp_path):
             settings=tokens.trusted_settings(tokens.new_key()),
             clock=FixedClock(T0),
             database_path=tmp_path / "does-not-exist.sqlite3",
+            asset_root=tmp_path / "assets",
         )
     )
     with TestClient(app) as client:
@@ -903,10 +911,11 @@ def test_two_applications_share_no_state(make_lab):
 
 def test_the_application_registers_only_the_approved_routes_and_serves_no_documentation(lab):
     paths = {getattr(route, "path", None) for route in lab.app.routes}
-    assert paths == {  # the GET, and the two coordinator-management routes (their own tests are in the next two files)
+    assert paths == {  # the GET, the two coordinator-management routes and the asset read (each has its own test file)
         "/productions/{production_id:path}/engagement",
         "/productions/{production_id:path}/engagements",
         "/productions/{production_id:path}/engagements/{engagement_id:path}/revoke",
+        "/productions/{production_id:path}/assets/{asset_id:path}",
     }
     for path in ("/docs", "/redoc", "/openapi.json", "/"):
         assert lab.client.get(path).status_code == 404

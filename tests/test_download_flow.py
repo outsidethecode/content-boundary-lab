@@ -26,12 +26,16 @@ from urllib.parse import unquote
 
 import pytest
 from support import token_issuer as tokens
-from support.http_lab import (
+from support.http_lab import (  # the scripted ASGI client moved to the harness so the API tests can drive the real app
     LOGGER,
     T0,
+    Client,
+    assert_one_start_and_no_replacement,
     assert_released,
     lab,
     make_lab,
+    play,
+    play_and_cancel,
     spy,
     transaction_whose_commit_fails,
     writer_lock,
@@ -41,7 +45,6 @@ from content_boundary_lab import audit, authz, request_flow, store
 from content_boundary_lab.clock import to_micros
 
 SYNTHETIC = bytes(range(256)) * 800  # 204,800 synthetic bytes
-SCOPE = {"type": "http", "asgi": {"version": "3.0", "spec_version": "2.3"}, "http_version": "1.1", "method": "GET", "path": "/", "headers": []}
 EXPECTED_HEADERS = {"content-type", "x-content-type-options", "cache-control", "content-disposition", "content-length"}
 
 
@@ -107,79 +110,6 @@ def run_flow(lab, operation, *, subject="vendor-1", action=None):
     )
 
 
-class Client:
-    """A scripted ASGI peer: what it receives, how it fails, and what the server sent."""
-
-    def __init__(self, *, disconnect=False, delay=0.0, fail_at=None, block_at=None, ranged=False, on_chunk=None) -> None:
-        self.messages: list[dict] = []
-        self.disconnect, self.delay, self.fail_at, self.block_at, self.on_chunk = disconnect, delay, fail_at, block_at, on_chunk
-        self.scope = {**SCOPE, "headers": [(b"range", b"bytes=0-9")] if ranged else []}
-        self.chunks = 0
-
-    async def receive(self):
-        if self.disconnect:
-            return {"type": "http.disconnect"}
-        await asyncio.sleep(3600)
-
-    async def send(self, message):
-        self.messages.append(message)
-        if self.delay:
-            await asyncio.sleep(self.delay)
-        if message["type"] == "http.response.start":
-            if self.fail_at == "start":
-                raise OSError("the client went away before the first byte")
-            if self.block_at == "start":
-                await asyncio.sleep(3600)
-        elif message.get("body"):
-            self.chunks += 1
-            if self.on_chunk:
-                self.on_chunk(self.chunks)
-            if self.fail_at == f"chunk{self.chunks}":
-                raise OSError("the client went away mid-stream")
-            if self.block_at == f"chunk{self.chunks}":
-                await asyncio.sleep(3600)
-
-    @property
-    def status(self):
-        return next((m["status"] for m in self.messages if m["type"] == "http.response.start"), None)
-
-    @property
-    def headers(self) -> dict[str, str]:
-        start = next(m for m in self.messages if m["type"] == "http.response.start")
-        return {name.decode(): value.decode() for name, value in start["headers"]}
-
-    @property
-    def body(self) -> bytes:
-        return b"".join(m.get("body", b"") for m in self.messages if m["type"] == "http.response.body")
-
-
-def play(response, client: Client, *, expect=None):
-    """Call the response as an ASGI application. `expect` is the exception type the server should see, if any."""
-    if expect is None:
-        asyncio.run(response(client.scope, client.receive, client.send))
-    else:
-        with pytest.raises(expect):
-            asyncio.run(response(client.scope, client.receive, client.send))
-
-
-def play_and_cancel(response, client: Client):
-    """Cancel the ASGI call once the client has begun to block, as a server does when a connection is dropped."""
-
-    async def main():
-        task = asyncio.ensure_future(response(client.scope, client.receive, client.send))
-        while not client.messages:
-            await asyncio.sleep(0.01)
-        await asyncio.sleep(0.05)
-        task.cancel()
-        with contextlib.suppress(asyncio.CancelledError):
-            await task
-
-    asyncio.run(main())
-
-
-def assert_one_start_and_no_replacement(client: Client) -> None:
-    assert [m["type"] for m in client.messages].count("http.response.start") <= 1
-    assert all(m["status"] == 200 for m in client.messages if m["type"] == "http.response.start")  # never a replacement 500
 
 
 # ------------------------------------------------------------------------------------------------- a download
@@ -209,7 +139,7 @@ def test_the_flow_streams_the_open_file_after_the_commit_with_the_fixed_headers(
 
 
 def test_a_range_request_is_ignored_and_the_whole_file_is_sent(lab, synthetic_file):
-    client = Client(ranged=True)
+    client = Client(headers=[(b"range", b"bytes=0-9")])
     play(run_flow(lab, stand_in(synthetic_file, [])), client)
     assert client.status == 200 and client.body == SYNTHETIC and "content-range" not in client.headers
 

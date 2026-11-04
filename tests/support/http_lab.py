@@ -6,6 +6,8 @@ writer lock while another commits) threads are coordinated with events, never wi
 this module and it is not packaged.
 """
 
+import asyncio
+import contextlib
 import sqlite3
 import threading
 from contextlib import contextmanager
@@ -97,13 +99,24 @@ class Lab:
 
     def __init__(self, directory: Path, name: str = "lab") -> None:
         self.path = directory / f"{name}.sqlite3"
+        self.asset_root = directory / f"{name}-trusted"  # the trusted asset root: one file per asset, named by its id
+        self.quarantine_root = directory / f"{name}-quarantine"  # never configured anywhere: nothing may serve from it
+        self.asset_root.mkdir()
+        self.quarantine_root.mkdir()
         self.key = tokens.new_key("key-1")
         self.clock = RecordingClock(T0)
         self.engagements: dict[str, str] = {}
+        self.assets: dict[str, str] = {}  # asset ids by short name
+        self.asset_content: dict[str, bytes] = {}  # the synthetic bytes of each
         store.initialise_schema(self.path)
         self._seed()
         self.app = create_app(
-            Dependencies(settings=tokens.trusted_settings(self.key), clock=self.clock, database_path=self.path)
+            Dependencies(
+                settings=tokens.trusted_settings(self.key),
+                clock=self.clock,
+                database_path=self.path,
+                asset_root=self.asset_root,
+            )
         )
         self.client = TestClient(self.app)
 
@@ -128,8 +141,32 @@ class Lab:
                     self.engagements[key] = store.add_engagement(conn, seeding, subject_id, production, role, ends_at)
                 store.add_subject(conn, seeding, tokens.ISSUER, "outsider-1", "Outsider")  # no engagement
                 store.add_subject(conn, seeding, OTHER_ISSUER, "foreign-only", "Foreign")  # exists, but not for our issuer
+                dual = store.add_subject(conn, seeding, tokens.ISSUER, "dual-1", "Dual")  # a vendor on both productions
+                self.engagements["dual_alpha"] = store.add_engagement(conn, seeding, dual, self.alpha, "vendor", LONG_END)
+                self.engagements["dual_bravo"] = store.add_engagement(conn, seeding, dual, self.bravo, "vendor", LONG_END)
+                for short, production, display_name in (
+                    ("alpha", self.alpha, "alpha-reference.mov"),
+                    ("alpha_two", self.alpha, "alpha-two.wav"),
+                    ("bravo", self.bravo, "bravo-unreleased.mov"),
+                ):
+                    self.assets[short] = store.add_asset(conn, seeding, production, display_name)
         finally:
             conn.close()
+        for short, asset_id in self.assets.items():  # synthetic bytes, different for every asset
+            self.asset_content[short] = f"synthetic content of {short}\n".encode() * 4000
+            (self.asset_root / asset_id).write_bytes(self.asset_content[short])
+
+    def add_asset(self, production: str, display_name: str, content: bytes | None = b"synthetic\n" * 100) -> str:
+        """A new asset row, and (unless content is None) its bytes under the trusted root."""
+        conn = REAL_CONNECT(self.path)
+        try:
+            with store.transaction(conn):
+                asset_id = store.add_asset(conn, FixedClock(SEEDED_AT), production, display_name)
+        finally:
+            conn.close()
+        if content is not None:
+            (self.asset_root / asset_id).write_bytes(content)
+        return asset_id
 
     def production(self, name: str) -> str:
         """A production id, or a derived invalid form of a real one, or the text itself."""
@@ -337,6 +374,85 @@ def writer_lock(lab: Lab):
             yield holder
     finally:
         holder.close()
+
+
+class Client:
+    """A scripted ASGI peer: what it receives, how it fails, and what the server sent. Drives a response or a whole app."""
+
+    def __init__(self, *, path="/", headers=(), method="GET", disconnect=False, delay=0.0, fail_at=None, block_at=None, on_chunk=None) -> None:
+        self.messages: list[dict] = []
+        self.disconnect, self.delay, self.fail_at, self.block_at, self.on_chunk = disconnect, delay, fail_at, block_at, on_chunk
+        self.scope = {
+            "type": "http", "asgi": {"version": "3.0", "spec_version": "2.3"}, "http_version": "1.1", "method": method,
+            "scheme": "http", "path": path, "raw_path": path.encode(), "query_string": b"", "root_path": "",
+            "headers": list(headers), "client": ("testclient", 50000), "server": ("testserver", 80),
+        }  # fmt: skip
+        self.chunks = 0
+
+    async def receive(self):
+        if self.disconnect:
+            return {"type": "http.disconnect"}
+        await asyncio.sleep(3600)
+
+    async def send(self, message):
+        self.messages.append(message)
+        if self.delay:
+            await asyncio.sleep(self.delay)
+        if message["type"] == "http.response.start":
+            if self.fail_at == "start":
+                raise OSError("the client went away before the first byte")
+            if self.block_at == "start":
+                await asyncio.sleep(3600)
+        elif message.get("body"):
+            self.chunks += 1
+            if self.on_chunk:
+                self.on_chunk(self.chunks)
+            if self.fail_at == f"chunk{self.chunks}":
+                raise OSError("the client went away mid-stream")
+            if self.block_at == f"chunk{self.chunks}":
+                await asyncio.sleep(3600)
+
+    @property
+    def status(self):
+        return next((m["status"] for m in self.messages if m["type"] == "http.response.start"), None)
+
+    @property
+    def headers(self) -> dict[str, str]:
+        start = next(m for m in self.messages if m["type"] == "http.response.start")
+        return {name.decode(): value.decode() for name, value in start["headers"]}
+
+    @property
+    def body(self) -> bytes:
+        return b"".join(m.get("body", b"") for m in self.messages if m["type"] == "http.response.body")
+
+
+def play(target, client: Client, *, expect=None):
+    """Call `target` (a response, or a whole application) as ASGI. `expect` is the exception the server should see."""
+    if expect is None:
+        asyncio.run(target(client.scope, client.receive, client.send))
+    else:
+        with pytest.raises(expect):
+            asyncio.run(target(client.scope, client.receive, client.send))
+
+
+def play_and_cancel(target, client: Client):
+    """Cancel the ASGI call once the client has begun to block, as a server does when a connection is dropped."""
+
+    async def main():
+        task = asyncio.ensure_future(target(client.scope, client.receive, client.send))
+        while not client.messages:
+            await asyncio.sleep(0.01)
+        await asyncio.sleep(0.05)
+        task.cancel()
+        with contextlib.suppress(asyncio.CancelledError):
+            await task
+
+    asyncio.run(main())
+
+
+def assert_one_start_and_no_replacement(client: Client) -> None:
+    assert [m["type"] for m in client.messages].count("http.response.start") <= 1
+    assert all(m["status"] == 200 for m in client.messages if m["type"] == "http.response.start")  # never a replacement 500
 
 
 def denial(subject: str, production_id: str | None, reason: str, *, at: datetime = T0) -> dict:

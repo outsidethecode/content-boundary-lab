@@ -19,16 +19,24 @@ ALLOWED_ROUTES: frozenset[tuple[str, frozenset[str]]] = frozenset(
         ("/productions/{production_id:path}/engagement", frozenset({"GET"})),
         ("/productions/{production_id:path}/engagements", frozenset({"POST"})),
         ("/productions/{production_id:path}/engagements/{engagement_id:path}/revoke", frozenset({"POST"})),
+        ("/productions/{production_id:path}/assets/{asset_id:path}", frozenset({"GET"})),
     }
 )
 UNSERVED_PATHS = ["/", "/docs", "/docs/oauth2-redirect", "/redoc", "/openapi.json"]
 KEY = tokens.new_key("key-1")
 
 
+def _complete(tmp_path: Path) -> dict:
+    return {
+        "settings": tokens.trusted_settings(KEY),
+        "clock": SystemClock(),
+        "database_path": tmp_path / "unused.sqlite3",
+        "asset_root": tmp_path / "assets",
+    }
+
+
 def _dependencies(tmp_path: Path) -> Dependencies:
-    return Dependencies(
-        settings=tokens.trusted_settings(KEY), clock=SystemClock(), database_path=tmp_path / "unused.sqlite3"
-    )
+    return Dependencies(**_complete(tmp_path))
 
 
 @pytest.fixture
@@ -66,11 +74,12 @@ def test_dependencies_is_a_frozen_dataclass(tmp_path):
 
 
 def test_dependencies_hold_exactly_the_approved_fields_and_no_selector():
-    assert [field.name for field in dataclasses.fields(Dependencies)] == ["settings", "clock", "database_path"]
+    fields = [field.name for field in dataclasses.fields(Dependencies)]
+    assert fields == ["settings", "clock", "database_path", "asset_root"]
 
 
 def test_dependencies_are_all_required_and_nothing_else_is_accepted(tmp_path):
-    complete = {"settings": tokens.trusted_settings(KEY), "clock": SystemClock(), "database_path": tmp_path / "db"}
+    complete = _complete(tmp_path)
     with pytest.raises(TypeError):
         Dependencies()
     for missing in complete:
@@ -90,13 +99,20 @@ def test_dependencies_are_all_required_and_nothing_else_is_accepted(tmp_path):
         ("clock", object()),
         ("database_path", "lab.sqlite3"),
         ("database_path", None),
+        ("asset_root", "/srv/assets"),
+        ("asset_root", None),
     ],
     ids=repr,
 )
 def test_dependencies_validate_their_types(tmp_path, name, invalid):
-    complete = {"settings": tokens.trusted_settings(KEY), "clock": SystemClock(), "database_path": tmp_path / "db"}
     with pytest.raises(TypeError, match=name):
-        Dependencies(**{**complete, name: invalid})
+        Dependencies(**{**_complete(tmp_path), name: invalid})
+
+
+def test_the_asset_root_must_be_an_absolute_path_so_it_cannot_depend_on_the_working_directory(tmp_path):
+    with pytest.raises(ValueError, match="asset_root"):
+        Dependencies(**{**_complete(tmp_path), "asset_root": Path("relative/assets")})
+    assert Dependencies(**_complete(tmp_path)).asset_root.is_absolute()
 
 
 def test_create_app_has_one_required_deps_parameter():
@@ -141,6 +157,7 @@ def test_openapi_schema_describes_only_the_approved_routes(app):
         "/productions/{production_id}/engagement",
         "/productions/{production_id}/engagements",
         "/productions/{production_id}/engagements/{engagement_id}/revoke",
+        "/productions/{production_id}/assets/{asset_id}",
     }
 
 
