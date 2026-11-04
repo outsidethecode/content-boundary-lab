@@ -20,7 +20,7 @@ import pytest
 from fastapi.testclient import TestClient
 from support import token_issuer as tokens
 
-from content_boundary_lab import audit, authz, identity, store
+from content_boundary_lab import audit, authz, engagements, identity, request_flow, store
 from content_boundary_lab.app import Dependencies, create_app
 from content_boundary_lab.clock import to_micros
 
@@ -37,7 +37,7 @@ GENERIC = {
     500: {"detail": "Internal server error"},
     503: {"detail": "Service unavailable"},
 }
-LOGGER = "content_boundary_lab.engagements"
+LOGGER = "content_boundary_lab.request_flow"  # failures are logged by the shared request flow
 REAL_CONNECT = store.connect  # the tests' own connections must not go through the spy
 THREAD_WAIT = 10
 
@@ -994,6 +994,96 @@ def test_the_header_is_added_by_the_handler_and_not_to_the_frameworks_own_answer
     assert lab.audit_rows() == []
 
 
+# ------------------------------------------------------------------------------------- the shared request flow
+# The management routes will give request_flow.handle() their own action and operation. These tests drive it directly
+# with a stand-in operation, so that what a later endpoint relies on is checked here and not only through the GET.
+
+
+class Calls:
+    """A stand-in operation that remembers what it was given, and records no audit event of its own."""
+
+    def __init__(self, decision=None, fail: Exception | None = None) -> None:
+        self.contexts: list[request_flow.Context] = []
+        self.seen: list[dict] = []
+        self.decision = decision or request_flow.Decision(200, {"done": "yes"})
+        self.fail = fail
+
+    def __call__(self, ctx: request_flow.Context) -> request_flow.Decision:
+        self.contexts.append(ctx)
+        self.seen.append({"in_transaction": ctx.conn.in_transaction, "instants": [ctx.clock.now(), ctx.clock.now()]})
+        if self.fail is not None:
+            raise self.fail
+        return self.decision
+
+
+def run_flow(lab: Lab, operation, *, action=authz.Action.MANAGE_ENGAGEMENTS, subject="coordinator-1", **kwargs):
+    token = lab.token(subject) if subject else None
+    return request_flow.handle(
+        tokens.trusted_settings(lab.key),
+        lab.clock,
+        lab.path,
+        production_id=kwargs.pop("production_id", lab.alpha),
+        authorization=f"Bearer {token}" if token else None,
+        action=action,
+        operation=operation,
+    )
+
+
+def test_the_flow_authorises_the_action_the_endpoint_names(lab):
+    operation = Calls()
+    assert run_flow(lab, operation, subject="coordinator-1").status_code == 200  # may manage engagements
+    assert len(operation.contexts) == 1
+    refused = run_flow(lab, operation, subject="vendor-1")  # a vendor may view its own engagement, not manage any
+    assert refused.status_code == 403 and len(operation.contexts) == 1  # the operation did not run
+    assert run_flow(lab, operation, action=authz.Action.VIEW_OWN_ENGAGEMENT, subject="vendor-1").status_code == 200
+    assert [row["reason"] for row in lab.audit_rows()] == ["role_not_permitted"]
+    assert lab.audit_rows()[0]["actor_subject"] == "vendor-1"
+
+
+@pytest.mark.parametrize("subject", [None, "outsider-1"], ids=["no credentials", "no engagement"])
+def test_the_operation_never_runs_for_a_caller_who_failed_authentication_or_authorisation(lab, subject):
+    operation = Calls()
+    response = run_flow(lab, operation, subject=subject)
+    assert response.status_code == (401 if subject is None else 403)
+    assert operation.contexts == []
+    assert len(lab.audit_rows()) == 1  # the flow recorded the denial itself
+
+
+def test_the_operation_gets_the_open_transaction_the_caller_and_one_fixed_instant(lab):
+    lab.clock.step = timedelta(seconds=1)
+    operation = Calls()
+    run_flow(lab, operation, subject="coordinator-1")
+    [ctx], [seen] = operation.contexts, operation.seen
+    assert seen["in_transaction"] is True  # the writer lock is held while it runs
+    assert seen["instants"] == [T0, T0]  # the fixed instant, however often it is read
+    assert lab.clock.calls == 1
+    assert ctx.now_micros == to_micros(T0) and ctx.production_id == lab.alpha
+    assert (ctx.caller.issuer, ctx.caller.subject) == (tokens.ISSUER, "coordinator-1")
+    assert (ctx.grant.engagement_id, ctx.grant.role) == (lab.engagements["coordinator"], "coordinator")
+    assert is_closed(ctx.conn)  # and the flow closed the connection when it was done
+
+
+def test_an_operation_that_fails_rolls_back_the_whole_request_and_gives_a_generic_500(lab, caplog):
+    def writes_then_fails(ctx):
+        audit.record_event(
+            ctx.conn, ctx.clock, audit.AuditAction.ENGAGEMENT_VIEWED, audit.Outcome.ALLOWED, actor=ctx.caller.as_actor()
+        )
+        raise RuntimeError("the operation failed after writing")
+
+    with caplog.at_level(logging.ERROR, logger=LOGGER):
+        response = run_flow(lab, writes_then_fails)
+    assert response.status_code == 500 and response.body == b'{"detail":"Internal server error"}'
+    assert lab.audit_rows() == []  # what the operation wrote went with the transaction
+    assert [record.name for record in caplog.records] == [LOGGER] and caplog.records[0].exc_info is not None
+
+
+def test_the_flow_adds_no_store_to_the_operations_answer_and_keeps_its_own_headers(lab):
+    operation = Calls(request_flow.Decision(201, {"created": "yes"}, {"X-Example": "kept"}))
+    response = run_flow(lab, operation)
+    assert response.status_code == 201
+    assert response.headers.getlist("cache-control") == ["no-store"] and response.headers["x-example"] == "kept"
+
+
 # ------------------------------------------------------------------------- isolation and the application contract
 
 
@@ -1018,23 +1108,51 @@ def test_the_application_registers_only_the_engagement_route_and_serves_no_docum
         assert lab.client.get(path).status_code == 404
 
 
-def _engagements_source(lab: Lab) -> ast.Module:
-    [route] = [route for route in lab.app.routes if getattr(route, "path", "").endswith("/engagement")]
-    return ast.parse(Path(inspect.getsourcefile(route.endpoint)).read_text())
+def _source(module) -> ast.Module:
+    return ast.parse(Path(inspect.getsourcefile(module)).read_text())
 
 
-def test_the_module_reads_the_injected_clock_once_and_no_other_time_source(lab):
-    tree = _engagements_source(lab)
-    attributes = [node.attr for node in ast.walk(tree) if isinstance(node, ast.Attribute)]
-    assert attributes.count("now") == 1  # `clock.now()`; the per-request adapter's `def now` only returns its instant
-    assert not {"utcnow", "today", "time", "time_ns", "monotonic", "perf_counter", "SystemClock"} & set(attributes)
+def _attributes(tree: ast.Module) -> list[str]:
+    return [node.attr for node in ast.walk(tree) if isinstance(node, ast.Attribute)]
+
+
+def _imports(tree: ast.Module) -> set[str]:
     imports = {alias.name for node in ast.walk(tree) if isinstance(node, ast.Import) for alias in node.names}
-    imports |= {node.module for node in ast.walk(tree) if isinstance(node, ast.ImportFrom)}
-    assert not {"time", "os", "sys"} & imports
+    return imports | {node.module for node in ast.walk(tree) if isinstance(node, ast.ImportFrom)}
 
 
-def test_the_module_keeps_no_mutable_global_state(lab):
-    tree = _engagements_source(lab)
+TIME_SOURCES = {"utcnow", "today", "time", "time_ns", "monotonic", "perf_counter", "SystemClock"}
+
+
+def test_the_endpoint_handler_is_the_one_registered_by_the_endpoint_module(lab):
+    [route] = [route for route in lab.app.routes if getattr(route, "path", "").endswith("/engagement")]
+    assert inspect.getsourcefile(route.endpoint) == inspect.getsourcefile(engagements)
+
+
+def test_the_request_flow_reads_the_injected_clock_once_and_no_other_time_source():
+    tree = _source(request_flow)
+    attributes = _attributes(tree)
+    assert attributes.count("now") == 1  # `clock.now()`; the per-request adapter's `def now` only returns its instant
+    assert not TIME_SOURCES & set(attributes)
+    assert not {"time", "os", "sys"} & _imports(tree)
+
+
+# What only the shared flow may do, so that no endpoint can reorder, skip or repeat a step of it.
+FLOW_ONLY = {"connect", "transaction", "authenticate", "authorize_engagement", "commit", "rollback", "execute", "close", "now"}
+
+
+def test_the_endpoint_module_does_none_of_the_flow_itself():
+    tree = _source(engagements)
+    assert not FLOW_ONLY & set(_attributes(tree))
+    assert not TIME_SOURCES & set(_attributes(tree))
+    assert not {"time", "os", "sys", "sqlite3"} & _imports(tree)
+    imported_names = {alias.name for node in ast.walk(tree) if isinstance(node, ast.ImportFrom) for alias in node.names}
+    assert "request_flow" in imported_names  # it hands the request to the shared flow
+
+
+@pytest.mark.parametrize("module", [request_flow, engagements], ids=["request_flow", "engagements"])
+def test_the_module_keeps_no_mutable_global_state(module):
+    tree = _source(module)
     assert not [node for node in ast.walk(tree) if isinstance(node, (ast.Global, ast.Nonlocal))]
     mutable = (ast.List, ast.Dict, ast.Set, ast.ListComp, ast.DictComp, ast.SetComp)
     module_level = [

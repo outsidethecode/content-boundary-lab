@@ -6,11 +6,14 @@ differs from the one initialise_schema() creates and installs a default-deny aut
 their limits, in docs/decisions.md (AM-13).
 """
 
+import re
 import sqlite3
 import uuid
 from collections.abc import Iterator
 from contextlib import contextmanager
+from dataclasses import dataclass
 from datetime import datetime
+from enum import StrEnum
 from pathlib import Path
 from typing import Literal
 
@@ -311,12 +314,79 @@ def add_engagement(
 
 
 def revoke_engagement(conn: sqlite3.Connection, clock: Clock, engagement_id: str) -> bool:
-    """Set the revocation time once. True if this call revoked it; False if it was already revoked or is missing."""
+    """Set the revocation time once. True if this call revoked it; False if it was already revoked or is missing.
+
+    This is unscoped: it names no production, so it revokes the engagement with this id wherever it is. It is unsuitable
+    for any id a request controls, and only the seeding code and the tests of this module may call it; request code
+    uses revoke_engagement_in_production (tests/guards/test_revocation_scope.py enforces that). It will be removed when
+    its remaining test call sites are migrated.
+    """
     cursor = conn.execute(
         "UPDATE engagements SET revoked_at = ? WHERE id = ? AND revoked_at IS NULL",
         (to_micros(clock.now()), engagement_id),
     )
     return cursor.rowcount == 1
+
+
+class RevocationStatus(StrEnum):
+    """What revoke_engagement_in_production did."""
+
+    REVOKED = "revoked"  # this call set revoked_at
+    ALREADY_REVOKED = "already_revoked"  # in this production, revoked earlier; nothing was changed
+    NOT_FOUND = "not_found"  # no engagement with this id in this production (it may exist in another)
+
+
+@dataclass(frozen=True)
+class Revocation:
+    """revoked_at is in microseconds: the original time for ALREADY_REVOKED, and None only for NOT_FOUND."""
+
+    status: RevocationStatus
+    revoked_at: int | None
+
+
+_ID = re.compile(r"[0-9a-f]{32}")  # the shape of every id this module generates
+
+
+def _check_id(name: str, value: object) -> None:
+    if type(value) is not str:
+        raise TypeError(f"{name} must be a str, got {type(value).__name__}")
+    if not _ID.fullmatch(value):
+        raise ValueError(f"{name} must be 32 lowercase hexadecimal characters")  # the value is never echoed
+
+
+def revoke_engagement_in_production(
+    conn: sqlite3.Connection, production_id: str, engagement_id: str, now_micros: int
+) -> Revocation:
+    """Revoke one engagement of one production, at the instant the caller supplies.
+
+    The production is part of the UPDATE that mutates, so an engagement of another production is never reached: its id
+    under this production's id gives NOT_FOUND, exactly as an id that does not exist does, and nothing changes. An
+    engagement already revoked here is left as it is and reported with its original time.
+
+    The caller owns the transaction (use store.transaction(), and authorise the caller for this production in the same
+    one): this function never commits or rolls back, reads no clock, and raises StoreError outside a transaction.
+    Malformed ids raise TypeError or ValueError before any SQL runs.
+    """
+    _check_id("production_id", production_id)
+    _check_id("engagement_id", engagement_id)
+    if type(now_micros) is not int:
+        raise TypeError("now_micros must be an int (a bool is not accepted)")
+    if not conn.in_transaction:
+        raise StoreError("a revocation must run inside the caller's transaction")
+    cursor = conn.execute(
+        "UPDATE engagements SET revoked_at = ? WHERE id = ? AND production_id = ? AND revoked_at IS NULL",
+        (now_micros, engagement_id, production_id),
+    )
+    if cursor.rowcount == 1:
+        return Revocation(RevocationStatus.REVOKED, now_micros)
+    row = conn.execute(
+        "SELECT revoked_at FROM engagements WHERE id = ? AND production_id = ?", (engagement_id, production_id)
+    ).fetchone()
+    if row is None:
+        return Revocation(RevocationStatus.NOT_FOUND, None)
+    if row[0] is None:  # the UPDATE changed nothing, yet the engagement is active: never report that as a repeat
+        raise StoreError("an active engagement was not revoked by the update")
+    return Revocation(RevocationStatus.ALREADY_REVOKED, row[0])
 
 
 def add_asset(conn: sqlite3.Connection, clock: Clock, production_id: str, display_name: str) -> str:
