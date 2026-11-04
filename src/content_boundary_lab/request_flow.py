@@ -38,6 +38,11 @@ failed or whether a production exists. Reasons go to the audit record only, as t
 authentication failure is recorded with no actor and no production (the path and the token are unauthenticated input),
 and never with the token or the AuthFailure. Every answer carries `Cache-Control: no-store`.
 
+A request whose bytes arrive after its first transaction (an upload) uses the two halves of handle() itself:
+decide() runs steps 1 to 8 and returns the Decision, respond() builds the answer, and proceed() is a second, shorter
+transaction for the same request that skips steps 4 and 5 (the caller and grant of the first are passed in) and keeps
+the rest. Each transaction appends exactly one audit event, so such a request leaves one event per committed decision.
+
 Scope of the audit guarantee. One audit event per request holds for the decisions a handler makes through this flow. An
 unmatched path, a method the route does not accept and any other answer the framework gives before a handler runs (404,
 405) are outside it: no handler runs, so nothing is decided, recorded or marked no-store.
@@ -334,27 +339,20 @@ def _check_one_audit_event(conn: sqlite3.Connection, baseline: int) -> None:
         raise AuditCountError(f"a request must append exactly one audit event, found {appended}")
 
 
-def _run(
-    settings: TrustedSettings,
-    clock: Clock,
-    database_path: Path,
-    production_id: str,
-    authorization: str | None,
-    action: authz.Action,
-    operation: Operation,
-    body: RequestBody | None,
-) -> Decision:
+Decider = Callable[[sqlite3.Connection, _Snapshot, int], Decision]
+
+
+def _run(clock: Clock, database_path: Path, decider: Decider) -> Decision:
+    """One transaction: the order of the module docstring around whatever `decider` decides inside it."""
     conn = store.connect(database_path)
     decision: Decision | None = None
     try:
         with store.transaction(conn):
-            moment = clock.now()  # the only clock read of the request, made while holding the writer lock
+            moment = clock.now()  # the only clock read of the transaction, made while holding the writer lock
             now_micros = to_micros(moment)
             snapshot = _Snapshot(moment)
             baseline = _audit_baseline(conn)
-            decision = _decide(
-                conn, settings, snapshot, now_micros, production_id, authorization, action, operation, body
-            )
+            decision = decider(conn, snapshot, now_micros)
             _check_one_audit_event(conn, baseline)  # before the commit: a miscount rolls everything back
         return decision  # the transaction has committed
     except BaseException:
@@ -365,14 +363,21 @@ def _run(
         conn.close()
 
 
-def _failed(error: Exception) -> Decision:
-    """A request that could not be decided and recorded. The client learns nothing about why."""
+def failure(error: Exception) -> Decision:
+    """The one answer for a request that could not be decided and recorded. The client learns nothing about why."""
     code = getattr(error, "sqlite_errorcode", None)
     if isinstance(error, sqlite3.OperationalError) and isinstance(code, int) and code & _PRIMARY_CODE_MASK in _LOCK_CODES:
-        logger.warning("engagement request not served: the database is locked")
+        logger.warning("request not served: the database is locked")
         return _unavailable()
-    logger.error("engagement request failed; nothing was decided", exc_info=error)
+    logger.error("request failed; nothing was decided", exc_info=error)
     return _server_error()
+
+
+def _guarded(clock: Clock, database_path: Path, decider: Decider) -> Decision:
+    try:
+        return _run(clock, database_path, decider)
+    except Exception as error:  # fail closed: whatever went wrong, no decision is delivered (and it is logged)
+        return failure(error)
 
 
 def safe_download_filename(display_name: str) -> str:
@@ -449,6 +454,74 @@ class DownloadResponse(StreamingResponse):
             self._download.close()
 
 
+def decide(
+    settings: TrustedSettings,
+    clock: Clock,
+    database_path: Path,
+    *,
+    production_id: str,
+    authorization: str | None,
+    action: authz.Action,
+    operation: Operation,
+    body: RequestBody | None = None,
+) -> Decision:
+    """Run one request through the flow above, up to and including the commit, and return what it decided.
+
+    handle() is respond(decide(...)). An endpoint whose request continues after this transaction (an upload, whose
+    bytes arrive between two short transactions) calls the two halves itself.
+    """
+
+    def authorised(conn: sqlite3.Connection, snapshot: _Snapshot, now_micros: int) -> Decision:
+        return _decide(conn, settings, snapshot, now_micros, production_id, authorization, action, operation, body)
+
+    return _guarded(clock, database_path, authorised)
+
+
+def proceed(
+    clock: Clock,
+    database_path: Path,
+    *,
+    caller: identity.VerifiedIdentity,
+    grant: authz.AuthorizedEngagement,
+    production_id: str,
+    operation: Operation,
+) -> Decision:
+    """A second transaction for a request that decide() has already authenticated and authorised.
+
+    It authenticates and authorises nobody: `caller` and `grant` must be the ones decide() gave the operation of this
+    same request (an AuthorizedEngagement cannot be built any other way). It keeps the rest of the order: BEGIN
+    IMMEDIATE, one clock read of its own, the operation, exactly one audit event, COMMIT, and the generic answer for any
+    failure. M0 §5.7 is the reason it does not look again: authorisation is checked when a request starts, and a started
+    transfer may finish. Only ingest.py calls it (tests/guards/test_delivery_scope.py).
+    """
+    if not isinstance(caller, identity.VerifiedIdentity):
+        raise TypeError("caller must be a VerifiedIdentity")
+    if not isinstance(grant, authz.AuthorizedEngagement):
+        raise TypeError("grant must be an AuthorizedEngagement from authorize_engagement()")
+    if type(production_id) is not str:
+        raise TypeError("production_id must be a str")
+    if not callable(operation):
+        raise TypeError("operation must be callable")
+
+    def decided(conn: sqlite3.Connection, snapshot: _Snapshot, now_micros: int) -> Decision:
+        return operation(Context(conn, snapshot, now_micros, caller, grant, production_id, None))
+
+    return _guarded(clock, database_path, decided)
+
+
+def respond(decision: Decision) -> Response:
+    """Build the response for a decision, after its transaction has ended."""
+    if decision.download is not None:
+        try:
+            return DownloadResponse(decision.download)
+        except BaseException:
+            decision.download.close()  # the response never took ownership
+            raise
+    # Every answer is personal to the caller, so none of them is to be stored by a cache.
+    headers = {**(decision.headers or {}), "Cache-Control": "no-store"}
+    return JSONResponse(decision.content, status_code=decision.status, headers=headers)
+
+
 def handle(
     settings: TrustedSettings,
     clock: Clock,
@@ -461,16 +534,14 @@ def handle(
     body: RequestBody | None = None,
 ) -> Response:
     """Run one request through the flow above and build its response, after the transaction has ended."""
-    try:
-        decision = _run(settings, clock, database_path, production_id, authorization, action, operation, body)
-    except Exception as error:  # fail closed: whatever went wrong, no decision is delivered (and it is logged)
-        decision = _failed(error)
-    if decision.download is not None:
-        try:
-            return DownloadResponse(decision.download)
-        except BaseException:
-            decision.download.close()  # the response never took ownership
-            raise
-    # Every answer is personal to the caller, so none of them is to be stored by a cache.
-    headers = {**(decision.headers or {}), "Cache-Control": "no-store"}
-    return JSONResponse(decision.content, status_code=decision.status, headers=headers)
+    decision = decide(
+        settings,
+        clock,
+        database_path,
+        production_id=production_id,
+        authorization=authorization,
+        action=action,
+        operation=operation,
+        body=body,
+    )
+    return respond(decision)

@@ -8,7 +8,11 @@ this module and it is not packaged.
 
 import asyncio
 import contextlib
+import hashlib
+import inspect
+import os
 import sqlite3
+import stat
 import threading
 from contextlib import contextmanager
 from datetime import datetime, timedelta, timezone
@@ -39,6 +43,66 @@ GENERIC = {
 LOGGER = "content_boundary_lab.request_flow"  # failures are logged by the shared request flow
 REAL_CONNECT = store.connect  # the tests' own connections must not go through the spy
 THREAD_WAIT = 10
+UPLOAD_LIMIT = 64 * 1024  # the harness application's cap on upload bytes; small, so that tests can exceed it cheaply
+DELIVERY = {  # a valid initiation body; the declared hash is deliberately not the hash of any test content
+    "display_name": "shot-010.mov",
+    "declared_size": 2500,
+    "declared_sha256": "c" * 64,
+    "declared_media_type": "video/quicktime",
+}
+# One valid route from INITIATED to every lifecycle state (Addendum §5.2), for seeding deliveries in a given state.
+STATE_ROUTES = {
+    "INITIATED": (),
+    "UPLOADED": ("UPLOADED",),
+    "SEALING": ("UPLOADED", "SEALING"),
+    "REJECTED": ("UPLOADED", "SEALING", "REJECTED"),
+    "SCAN_FAILED": ("UPLOADED", "SEALING", "SCAN_FAILED"),
+    "SCAN_PASSED": ("UPLOADED", "SEALING", "SCAN_PASSED"),
+    "ACCEPTED": ("UPLOADED", "SEALING", "SCAN_PASSED", "ACCEPTED"),
+    "PROMOTING": ("UPLOADED", "SEALING", "SCAN_PASSED", "ACCEPTED", "PROMOTING"),
+    "PROMOTED": ("UPLOADED", "SEALING", "SCAN_PASSED", "ACCEPTED", "PROMOTING", "PROMOTED"),
+    "INTEGRITY_FAILED": ("UPLOADED", "SEALING", "INTEGRITY_FAILED"),
+}
+
+
+def sha256_hex(data: bytes) -> str:
+    return hashlib.sha256(data).hexdigest()
+
+
+OCCUPANTS = ["a regular file", "a dangling symlink", "a symlink to a file outside", "a directory", "a named pipe"]
+
+
+def occupy(entry: Path, outside: Path, kind: str):
+    """Put something at `entry` and return a function that describes it exactly, to prove that it was not touched.
+
+    The description is the kind of entry, its inode, and its content or link target (never read from a pipe).
+    `outside` is a directory for the file that a symlink points at.
+    """
+    if kind == "a regular file":
+        entry.write_bytes(b"an unexpected file that was already here")
+    elif kind == "a dangling symlink":
+        entry.symlink_to(outside / "nowhere")
+    elif kind == "a symlink to a file outside":
+        (outside / "secret.txt").write_bytes(b"outside the quarantine root")
+        entry.symlink_to(outside / "secret.txt")
+    elif kind == "a directory":
+        entry.mkdir()
+    elif kind == "a named pipe":
+        os.mkfifo(entry)
+    else:
+        raise ValueError(kind)
+
+    def describe():
+        info = entry.lstat()
+        if stat.S_ISLNK(info.st_mode):
+            content = os.readlink(entry)
+        elif stat.S_ISREG(info.st_mode):
+            content = entry.read_bytes()
+        else:
+            content = None
+        return stat.S_IFMT(info.st_mode), info.st_ino, content
+
+    return describe
 
 
 class FixedClock:
@@ -100,7 +164,7 @@ class Lab:
     def __init__(self, directory: Path, name: str = "lab") -> None:
         self.path = directory / f"{name}.sqlite3"
         self.asset_root = directory / f"{name}-trusted"  # the trusted asset root: one file per asset, named by its id
-        self.quarantine_root = directory / f"{name}-quarantine"  # never configured anywhere: nothing may serve from it
+        self.quarantine_root = directory / f"{name}-quarantine"  # configured as the ingest root; nothing serves from it
         self.asset_root.mkdir()
         self.quarantine_root.mkdir()
         self.key = tokens.new_key("key-1")
@@ -116,6 +180,8 @@ class Lab:
                 clock=self.clock,
                 database_path=self.path,
                 asset_root=self.asset_root,
+                quarantine_root=self.quarantine_root,
+                max_upload_bytes=UPLOAD_LIMIT,
             )
         )
         self.client = TestClient(self.app)
@@ -167,6 +233,77 @@ class Lab:
         if content is not None:
             (self.asset_root / asset_id).write_bytes(content)
         return asset_id
+
+    # --- deliveries (M1H) -----------------------------------------------------------------------------------------
+
+    def deliveries_path(self, production: str | None = None) -> str:
+        return f"/productions/{quote(production or self.alpha, safe='')}/deliveries"
+
+    def content_path(self, delivery_id: str, production: str | None = None) -> str:
+        return f"{self.deliveries_path(production)}/{quote(delivery_id, safe='')}/content"
+
+    def initiate(self, subject: str | None = "vendor-1", production: str | None = None, *, fields=None, **options):
+        """POST a valid initiation (DELIVERY, with `fields` replacing members) as `subject`."""
+        return self.send("POST", self.deliveries_path(production), subject=subject, json={**DELIVERY, **(fields or {})}, **options)
+
+    def new_delivery(self, subject: str = "vendor-1", production: str | None = None, **fields) -> str:
+        response = self.initiate(subject, production, fields=fields)
+        assert response.status_code == 201, response.text
+        return response.json()["delivery_id"]
+
+    def upload(self, delivery_id: str, content=b"", subject: str | None = "vendor-1", production: str | None = None, **options):
+        return self.send("PUT", self.content_path(delivery_id, production), subject=subject, content=content, **options)
+
+    def upload_client(self, delivery_id, chunks, *, subject="vendor-1", token=None, production=None, then="complete", length=None, **kwargs):
+        """A scripted ASGI peer that PUTs `chunks` (bytes, or callables run between chunks) and then `then`.
+
+        `length` is the Content-Length it claims (a str is sent as it is, to claim nonsense); no credentials are sent if
+        `subject` and `token` are both None.
+        """
+        headers = []
+        if token is None and subject is not None:
+            token = self.token(subject)
+        if token is not None:
+            headers.append((b"authorization", f"Bearer {token}".encode()))
+        if length is not None:
+            headers.append((b"content-length", str(length).encode()))
+        return Client(method="PUT", path=self.content_path(delivery_id, production), headers=headers, inbound=list(chunks), then=then, **kwargs)
+
+    def delivery_rows(self) -> list[dict]:
+        conn = REAL_CONNECT(self.path)
+        try:
+            return [dict(row) for row in conn.execute("SELECT * FROM deliveries ORDER BY rowid")]
+        finally:
+            conn.close()
+
+    def delivery_row(self, delivery_id: str) -> dict:
+        (row,) = [row for row in self.delivery_rows() if row["id"] == delivery_id]
+        return row
+
+    def seed_delivery(self, subject: str = "vendor-1", production: str | None = None, state: str = "INITIATED", **fields):
+        """A delivery row made directly in the store (not through the API), moved to `state` by valid steps only."""
+        values = {**DELIVERY, **fields}
+        conn = REAL_CONNECT(self.path)
+        try:
+            with store.transaction(conn):
+                owner = conn.execute("SELECT id FROM subjects WHERE issuer = ? AND subject = ?", (tokens.ISSUER, subject)).fetchone()[0]
+                created = store.add_delivery(conn, FixedClock(SEEDED_AT), production or self.alpha, owner, values["display_name"], values["declared_size"], values["declared_sha256"], values["declared_media_type"])
+                for step in STATE_ROUTES[state]:
+                    conn.execute(
+                        "UPDATE deliveries SET state = ?, received_size = 7, received_sha256 = ?, uploaded_at = ? WHERE id = ?",
+                        (step, "d" * 64, to_micros(SEEDED_AT), created.id),
+                    )
+        finally:
+            conn.close()
+        return created
+
+    def quarantine_names(self) -> list[str]:
+        """Every entry directly in the quarantine root except the staging directory."""
+        return sorted(entry.name for entry in self.quarantine_root.iterdir() if entry.name != ".incoming")
+
+    def incoming_names(self) -> list[str]:
+        staging = self.quarantine_root / ".incoming"
+        return sorted(entry.name for entry in staging.iterdir()) if staging.is_dir() else []
 
     def production(self, name: str) -> str:
         """A production id, or a derived invalid form of a real one, or the text itself."""
@@ -379,9 +516,14 @@ def writer_lock(lab: Lab):
 class Client:
     """A scripted ASGI peer: what it receives, how it fails, and what the server sent. Drives a response or a whole app."""
 
-    def __init__(self, *, path="/", headers=(), method="GET", disconnect=False, delay=0.0, fail_at=None, block_at=None, on_chunk=None) -> None:
+    def __init__(self, *, path="/", headers=(), method="GET", disconnect=False, delay=0.0, fail_at=None, block_at=None, on_chunk=None, inbound=None, then="complete") -> None:
         self.messages: list[dict] = []
         self.disconnect, self.delay, self.fail_at, self.block_at, self.on_chunk = disconnect, delay, fail_at, block_at, on_chunk
+        # A request body for an upload: bytes are sent as chunks, a callable is run (and awaited if it returns an awaitable)
+        # between chunks, and `then` says how the body ends: "complete", "disconnect" or "hang".
+        self.inbound = None if inbound is None else list(inbound)
+        self.then = then
+        self.delivered = 0  # how many chunks the application has asked for and been given
         self.scope = {
             "type": "http", "asgi": {"version": "3.0", "spec_version": "2.3"}, "http_version": "1.1", "method": method,
             "scheme": "http", "path": path, "raw_path": path.encode(), "query_string": b"", "root_path": "",
@@ -390,6 +532,20 @@ class Client:
         self.chunks = 0
 
     async def receive(self):
+        if self.inbound is not None:
+            while self.inbound:
+                item = self.inbound.pop(0)
+                if callable(item):
+                    outcome = item()
+                    if inspect.isawaitable(outcome):
+                        await outcome
+                    continue
+                self.delivered += 1
+                return {"type": "http.request", "body": item, "more_body": True}
+            if self.then == "complete":
+                return {"type": "http.request", "body": b"", "more_body": False}
+            if self.then == "disconnect":
+                return {"type": "http.disconnect"}
         if self.disconnect:
             return {"type": "http.disconnect"}
         await asyncio.sleep(3600)
@@ -435,12 +591,26 @@ def play(target, client: Client, *, expect=None):
             asyncio.run(target(client.scope, client.receive, client.send))
 
 
-def play_and_cancel(target, client: Client):
-    """Cancel the ASGI call once the client has begun to block, as a server does when a connection is dropped."""
+def play_together(target, *clients: Client) -> None:
+    """Run several scripted peers against one application at once, in one event loop."""
+
+    async def main():
+        # A peer that waits for another that never moves must fail the test, not hang the suite.
+        await asyncio.wait_for(asyncio.gather(*(target(client.scope, client.receive, client.send) for client in clients)), THREAD_WAIT)
+
+    asyncio.run(main())
+
+
+def play_and_cancel(target, client: Client, until=None):
+    """Cancel the ASGI call once the client has begun to block, as a server does when a connection is dropped.
+
+    "Begun to block" is, by default, that the server has sent something; `until(client)` says it otherwise (for example
+    that an upload has been given its first chunk).
+    """
 
     async def main():
         task = asyncio.ensure_future(target(client.scope, client.receive, client.send))
-        while not client.messages:
+        while not (until(client) if until else client.messages):
             await asyncio.sleep(0.01)
         await asyncio.sleep(0.05)
         task.cancel()

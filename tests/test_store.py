@@ -16,8 +16,14 @@ T0 = datetime(2026, 11, 3, 12, 0, 0, tzinfo=UTC)
 LATER = T0 + timedelta(days=30)
 ISSUER = "https://idp.example"
 MISSING_ID = "0" * 32
-TABLES = {"productions", "subjects", "engagements", "assets", "audit_events"}
+TABLES = {"productions", "subjects", "engagements", "assets", "deliveries", "audit_events"}
 TRIGGERS = {
+    "deliveries_start_as_initiated",
+    "deliveries_are_not_replaced",
+    "deliveries_are_kept",
+    "deliveries_identity_is_fixed",
+    "deliveries_follow_the_lifecycle",
+    "deliveries_receipt_is_final",
     "audit_events_no_update",
     "audit_events_no_delete",
     "audit_events_no_overwrite",

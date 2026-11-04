@@ -5,9 +5,11 @@ from pathlib import Path
 
 from fastapi import FastAPI
 
-from content_boundary_lab import assets, engagements, management
+from content_boundary_lab import assets, engagements, ingest, management
 from content_boundary_lab.clock import Clock
 from content_boundary_lab.settings import TrustedSettings
+
+MAX_SQLITE_INTEGER = 2**63 - 1
 
 
 @dataclass(frozen=True)
@@ -16,16 +18,23 @@ class Dependencies:
 
     settings is the trusted issuer, audience and public keys; clock is the one source of time; database_path is the
     SQLite file, opened afresh for every request; asset_root is the trusted directory that holds one file per asset,
-    named by the asset's id, which the application only reads and which must be an absolute path (a relative one would
-    depend on the working directory). There is no authorisation function to substitute and no switch for a vulnerable
-    variant: the reference application has exactly one way to decide. Later slices add fields only when a reviewed
-    change needs them.
+    named by the asset's id, which the application only reads; quarantine_root is the directory that holds the bytes of
+    uploads (staged under `.incoming`, then one file per delivery, named by a server-generated storage key), which the
+    application writes only through quarantine.py and never serves; max_upload_bytes is the most bytes one upload may
+    send, counted as they arrive. Both roots must be absolute paths (a relative one would depend on the working
+    directory), and they must be separate: neither may be, contain or lead to the other, so that nothing that can write
+    quarantine can write the trusted root. The upload limit is a deployment choice made by whoever builds the
+    dependencies, not a default of the application. There is no authorisation function to substitute and no switch for a
+    vulnerable variant: the reference application has exactly one way to decide. Later slices add fields only when a
+    reviewed change needs them.
     """
 
     settings: TrustedSettings
     clock: Clock
     database_path: Path
     asset_root: Path
+    quarantine_root: Path
+    max_upload_bytes: int
 
     def __post_init__(self) -> None:
         for name, kind in (
@@ -33,12 +42,21 @@ class Dependencies:
             ("clock", Clock),
             ("database_path", Path),
             ("asset_root", Path),
+            ("quarantine_root", Path),
         ):
             value = getattr(self, name)
             if not isinstance(value, kind):
                 raise TypeError(f"{name} must be a {kind.__name__}, got {type(value).__name__}")
-        if not self.asset_root.is_absolute():
-            raise ValueError("asset_root must be an absolute path")
+        if type(self.max_upload_bytes) is not int:  # a bool is an int in Python, and is not a size
+            raise TypeError(f"max_upload_bytes must be an int, got {type(self.max_upload_bytes).__name__}")
+        if not 1 <= self.max_upload_bytes <= MAX_SQLITE_INTEGER:
+            raise ValueError("max_upload_bytes must be between 1 and 2**63 - 1")
+        for name in ("asset_root", "quarantine_root"):
+            if not getattr(self, name).is_absolute():
+                raise ValueError(f"{name} must be an absolute path")
+        trusted, quarantined = self.asset_root.resolve(), self.quarantine_root.resolve()
+        if trusted == quarantined or trusted in quarantined.parents or quarantined in trusted.parents:
+            raise ValueError("asset_root and quarantine_root must be separate directories: neither may contain the other")
 
 
 def create_app(deps: Dependencies) -> FastAPI:
@@ -66,5 +84,17 @@ def create_app(deps: Dependencies) -> FastAPI:
         management.REVOKE_PATH,
         management.build_revoke_endpoint(deps.settings, deps.clock, deps.database_path),
         methods=["POST"],
+    )
+    app.add_api_route(
+        ingest.INITIATE_PATH,
+        ingest.build_initiate_endpoint(deps.settings, deps.clock, deps.database_path, deps.max_upload_bytes),
+        methods=["POST"],
+    )
+    app.add_api_route(
+        ingest.UPLOAD_PATH,
+        ingest.build_upload_endpoint(
+            deps.settings, deps.clock, deps.database_path, deps.quarantine_root, deps.max_upload_bytes
+        ),
+        methods=["PUT"],
     )
     return app

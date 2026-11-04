@@ -25,6 +25,11 @@ VOCABULARY = {
         "engagement.viewed",
         "access.denied",
         "asset.read",
+        "delivery.initiated",
+        "delivery.request_rejected",
+        "delivery.upload_started",
+        "delivery.uploaded",
+        "delivery.upload_failed",
     },
     AuditReason: {
         "no_engagement",
@@ -37,8 +42,10 @@ VOCABULARY = {
         "invalid_request",
         "engagement_exists",
         "payload_too_large",
+        "state_conflict",
+        "upload_interrupted",
     },
-    ObjectType: {"production", "engagement", "asset", "subject"},
+    ObjectType: {"production", "engagement", "asset", "subject", "delivery"},
     Outcome: {"allowed", "denied", "recorded"},
 }
 

@@ -33,13 +33,17 @@ class Action(StrEnum):
     VIEW_OWN_ENGAGEMENT = "view_own_engagement"
     MANAGE_ENGAGEMENTS = "manage_engagements"  # create and revoke engagements in the production
     READ_ASSET = "read_asset"  # download an asset of the production (which asset is the asset lookup's business)
+    INITIATE_DELIVERY = "initiate_delivery"  # declare a delivery in the production (M0 §2 step 3: the vendor)
+    UPLOAD_DELIVERY = "upload_delivery"  # send the bytes of a delivery (step 4: the vendor; which one is ingest's lookup)
 
 
 # The actions each engagement role may take. A role that is not listed may take none.
 POLICY = MappingProxyType(
     {
         "coordinator": frozenset({Action.VIEW_OWN_ENGAGEMENT, Action.MANAGE_ENGAGEMENTS, Action.READ_ASSET}),
-        "vendor": frozenset({Action.VIEW_OWN_ENGAGEMENT, Action.READ_ASSET}),
+        "vendor": frozenset(
+            {Action.VIEW_OWN_ENGAGEMENT, Action.READ_ASSET, Action.INITIATE_DELIVERY, Action.UPLOAD_DELIVERY}
+        ),
     }
 )
 DENIAL_REASONS = frozenset(

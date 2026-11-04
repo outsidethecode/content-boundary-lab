@@ -15,7 +15,7 @@ from dataclasses import dataclass
 from datetime import datetime
 from enum import StrEnum
 from pathlib import Path
-from typing import Literal
+from typing import Literal, NamedTuple
 
 from content_boundary_lab.clock import Clock, to_micros
 
@@ -36,6 +36,45 @@ class SchemaVersionError(StoreError):
 
 class SchemaIntegrityError(StoreError):
     """The database schema is not the one this version of the code creates: objects are missing, added or modified."""
+
+
+class DeliveryState(StrEnum):
+    """The delivery lifecycle of the M0 addendum (§5.2), in its order. Only the deliveries table holds one.
+
+    M1H moves a delivery from INITIATED to UPLOADED. The rest are the later milestones' (seal, trust gate, acceptance,
+    promotion), listed here so that the database already refuses any state or step the design does not have.
+    """
+
+    INITIATED = "INITIATED"
+    UPLOADED = "UPLOADED"
+    SEALING = "SEALING"
+    REJECTED = "REJECTED"
+    SCAN_FAILED = "SCAN_FAILED"
+    SCAN_PASSED = "SCAN_PASSED"
+    ACCEPTED = "ACCEPTED"
+    PROMOTING = "PROMOTING"
+    PROMOTED = "PROMOTED"
+    INTEGRITY_FAILED = "INTEGRITY_FAILED"
+
+
+_S = DeliveryState
+# Every change of state the design allows. PROMOTING -> PROMOTING (reconcile after a crash) leaves the state as it is.
+DELIVERY_TRANSITIONS: frozenset[tuple[DeliveryState, DeliveryState]] = frozenset(
+    {
+        (_S.INITIATED, _S.UPLOADED),
+        (_S.UPLOADED, _S.SEALING),
+        (_S.SEALING, _S.REJECTED),
+        (_S.SEALING, _S.SCAN_FAILED),
+        (_S.SEALING, _S.SCAN_PASSED),
+        (_S.SEALING, _S.INTEGRITY_FAILED),
+        (_S.SCAN_FAILED, _S.SEALING),
+        (_S.SCAN_PASSED, _S.SEALING),
+        (_S.SCAN_PASSED, _S.ACCEPTED),
+        (_S.ACCEPTED, _S.PROMOTING),
+        (_S.PROMOTING, _S.PROMOTED),
+        (_S.PROMOTING, _S.INTEGRITY_FAILED),
+    }
+)
 
 
 # One complete initial schema, applied in one transaction by initialise_schema(). Times are INTEGER microseconds
@@ -73,6 +112,65 @@ _SCHEMA: tuple[str, ...] = (
         created_at INTEGER NOT NULL
     ) STRICT""",
     "CREATE INDEX assets_by_production ON assets (production_id)",
+    # A delivery is one vendor's declaration of bytes to be sent (M0 §2). It is owned by the subject that made it, in
+    # one production, and its lifecycle state lives here and nowhere else (assets have no state). The storage key is
+    # the server's own name for the quarantined bytes: never shown to a client, never derived from anything it sent.
+    # The declared_* columns are the client's claims, kept for later consistency checks and display; the received_*
+    # columns are what the server measured while the bytes arrived, written once with the move to UPLOADED. The state
+    # list and the transition pairs below are Addendum §5.2, written out again and checked by tests/test_delivery_store.py.
+    """CREATE TABLE deliveries (
+        id TEXT NOT NULL PRIMARY KEY CHECK (length(id) = 32 AND id NOT GLOB '*[^0-9a-f]*'),
+        production_id TEXT NOT NULL REFERENCES productions (id) ON DELETE RESTRICT,
+        owner_subject_id INTEGER NOT NULL REFERENCES subjects (id) ON DELETE RESTRICT,
+        storage_key TEXT NOT NULL UNIQUE CHECK (length(storage_key) = 32 AND storage_key NOT GLOB '*[^0-9a-f]*'),
+        display_name TEXT NOT NULL CHECK (length(display_name) BETWEEN 1 AND 200),
+        declared_size INTEGER NOT NULL CHECK (declared_size >= 0),
+        declared_sha256 TEXT NOT NULL CHECK (length(declared_sha256) = 64 AND declared_sha256 NOT GLOB '*[^0-9a-f]*'),
+        declared_media_type TEXT NOT NULL CHECK (length(declared_media_type) BETWEEN 1 AND 255),
+        state TEXT NOT NULL CHECK (state IN (
+            'INITIATED', 'UPLOADED', 'SEALING', 'REJECTED', 'SCAN_FAILED',
+            'SCAN_PASSED', 'ACCEPTED', 'PROMOTING', 'PROMOTED', 'INTEGRITY_FAILED'
+        )),
+        created_at INTEGER NOT NULL,
+        uploaded_at INTEGER,
+        received_size INTEGER CHECK (received_size >= 0),
+        received_sha256 TEXT CHECK (length(received_sha256) = 64 AND received_sha256 NOT GLOB '*[^0-9a-f]*'),
+        CHECK ((state = 'INITIATED') = (received_sha256 IS NULL)),
+        CHECK ((received_sha256 IS NULL) = (received_size IS NULL) AND (received_sha256 IS NULL) = (uploaded_at IS NULL))
+    ) STRICT""",
+    # A delivery is created in INITIATED and never deleted, replaced or renamed (INSERT OR REPLACE would delete a row
+    # without firing the delete trigger, so a BEFORE INSERT guard rejects any insert that collides on id, rowid or
+    # storage key). Its identity and ownership never change. Its state moves only along an arrow of the lifecycle, and
+    # the receipt is written once, with the move out of INITIATED.
+    """CREATE TRIGGER deliveries_start_as_initiated BEFORE INSERT ON deliveries
+    WHEN NEW.state != 'INITIATED'
+    BEGIN SELECT RAISE(ABORT, 'a delivery starts as INITIATED'); END""",
+    """CREATE TRIGGER deliveries_are_not_replaced BEFORE INSERT ON deliveries
+    WHEN EXISTS (SELECT 1 FROM deliveries WHERE id = NEW.id OR rowid = NEW.rowid OR storage_key = NEW.storage_key)
+    BEGIN SELECT RAISE(ABORT, 'deliveries are not replaced'); END""",
+    """CREATE TRIGGER deliveries_are_kept BEFORE DELETE ON deliveries
+    BEGIN SELECT RAISE(ABORT, 'deliveries are kept'); END""",
+    """CREATE TRIGGER deliveries_identity_is_fixed BEFORE UPDATE ON deliveries
+    WHEN NEW.id IS NOT OLD.id OR NEW.production_id IS NOT OLD.production_id
+        OR NEW.owner_subject_id IS NOT OLD.owner_subject_id OR NEW.storage_key IS NOT OLD.storage_key
+        OR NEW.display_name IS NOT OLD.display_name OR NEW.declared_size IS NOT OLD.declared_size
+        OR NEW.declared_sha256 IS NOT OLD.declared_sha256 OR NEW.declared_media_type IS NOT OLD.declared_media_type
+        OR NEW.created_at IS NOT OLD.created_at OR NEW.rowid IS NOT OLD.rowid
+    BEGIN SELECT RAISE(ABORT, 'delivery identity is fixed'); END""",
+    """CREATE TRIGGER deliveries_follow_the_lifecycle BEFORE UPDATE ON deliveries
+    WHEN NEW.state != OLD.state AND (OLD.state, NEW.state) NOT IN (VALUES
+        ('INITIATED', 'UPLOADED'), ('UPLOADED', 'SEALING'), ('SEALING', 'REJECTED'), ('SEALING', 'SCAN_FAILED'),
+        ('SEALING', 'SCAN_PASSED'), ('SEALING', 'INTEGRITY_FAILED'), ('SCAN_FAILED', 'SEALING'),
+        ('SCAN_PASSED', 'SEALING'), ('SCAN_PASSED', 'ACCEPTED'), ('ACCEPTED', 'PROMOTING'),
+        ('PROMOTING', 'PROMOTED'), ('PROMOTING', 'INTEGRITY_FAILED')
+    )
+    BEGIN SELECT RAISE(ABORT, 'delivery state change is not in the lifecycle'); END""",
+    """CREATE TRIGGER deliveries_receipt_is_final BEFORE UPDATE ON deliveries
+    WHEN OLD.received_sha256 IS NOT NULL AND (
+        NEW.received_sha256 IS NOT OLD.received_sha256 OR NEW.received_size IS NOT OLD.received_size
+        OR NEW.uploaded_at IS NOT OLD.uploaded_at
+    )
+    BEGIN SELECT RAISE(ABORT, 'delivery receipt is final'); END""",
     # No foreign keys here: an event about a missing object must still be recordable.
     """CREATE TABLE audit_events (
         seq INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -387,6 +485,48 @@ def revoke_engagement_in_production(
     if row[0] is None:  # the UPDATE changed nothing, yet the engagement is active: never report that as a repeat
         raise StoreError("an active engagement was not revoked by the update")
     return Revocation(RevocationStatus.ALREADY_REVOKED, row[0])
+
+
+class NewDelivery(NamedTuple):
+    """The ids of a delivery that was just created. The storage key stays inside the server."""
+
+    id: str
+    storage_key: str
+
+
+def add_delivery(
+    conn: sqlite3.Connection,
+    clock: Clock,
+    production_id: str,
+    subject_id: int,
+    display_name: str,
+    declared_size: int,
+    declared_sha256: str,
+    declared_media_type: str,
+) -> NewDelivery:
+    """Record a vendor's declaration as a delivery in INITIATED, owned by `subject_id` in `production_id`.
+
+    The id and the storage key are generated here, independently of each other and of every argument. The declared
+    values are the client's claims: metadata for later checks and display, never a key, a path or an identity. The
+    caller validates them and authorises the subject for the production in the same transaction (ingest.py does).
+    """
+    delivery_id, storage_key = _new_id(), _new_id()
+    conn.execute(
+        "INSERT INTO deliveries (id, production_id, owner_subject_id, storage_key, display_name, declared_size, "
+        "declared_sha256, declared_media_type, state, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'INITIATED', ?)",
+        (
+            delivery_id,
+            production_id,
+            subject_id,
+            storage_key,
+            display_name,
+            declared_size,
+            declared_sha256,
+            declared_media_type,
+            to_micros(clock.now()),
+        ),
+    )
+    return NewDelivery(delivery_id, storage_key)
 
 
 def add_asset(conn: sqlite3.Connection, clock: Clock, production_id: str, display_name: str) -> str:

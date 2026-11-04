@@ -592,6 +592,8 @@ def test_a_database_that_cannot_be_opened_is_a_generic_500_without_the_path(tmp_
             clock=FixedClock(T0),
             database_path=missing,
             asset_root=tmp_path / "assets",
+            quarantine_root=tmp_path / "quarantine",
+            max_upload_bytes=1024,
         )
     )
     with TestClient(app) as client, caplog.at_level(logging.ERROR, logger=LOGGER):
@@ -724,6 +726,8 @@ def test_a_500_from_an_unopenable_database_is_not_to_be_stored(tmp_path):
             clock=FixedClock(T0),
             database_path=tmp_path / "does-not-exist.sqlite3",
             asset_root=tmp_path / "assets",
+            quarantine_root=tmp_path / "quarantine",
+            max_upload_bytes=1024,
         )
     )
     with TestClient(app) as client:
@@ -911,11 +915,13 @@ def test_two_applications_share_no_state(make_lab):
 
 def test_the_application_registers_only_the_approved_routes_and_serves_no_documentation(lab):
     paths = {getattr(route, "path", None) for route in lab.app.routes}
-    assert paths == {  # the GET, the two coordinator-management routes and the asset read (each has its own test file)
+    assert paths == {  # the GET, the two coordinator routes, the asset read and the two ingest routes (own test files)
         "/productions/{production_id:path}/engagement",
         "/productions/{production_id:path}/engagements",
         "/productions/{production_id:path}/engagements/{engagement_id:path}/revoke",
         "/productions/{production_id:path}/assets/{asset_id:path}",
+        "/productions/{production_id:path}/deliveries",
+        "/productions/{production_id:path}/deliveries/{delivery_id:path}/content",
     }
     for path in ("/docs", "/redoc", "/openapi.json", "/"):
         assert lab.client.get(path).status_code == 404

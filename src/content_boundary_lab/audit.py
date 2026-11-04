@@ -31,6 +31,11 @@ class AuditAction(StrEnum):
     ENGAGEMENT_VIEWED = "engagement.viewed"
     ACCESS_DENIED = "access.denied"
     ASSET_READ = "asset.read"
+    DELIVERY_INITIATED = "delivery.initiated"  # a vendor's declaration was stored as a delivery in INITIATED
+    DELIVERY_REQUEST_REJECTED = "delivery.request_rejected"  # an authorised delivery request refused before any byte was kept
+    DELIVERY_UPLOAD_STARTED = "delivery.upload_started"  # committed admission to begin receiving; not that any byte arrived
+    DELIVERY_UPLOADED = "delivery.uploaded"  # the bytes are in quarantine and the move to UPLOADED committed with this event
+    DELIVERY_UPLOAD_FAILED = "delivery.upload_failed"  # a started upload that did not end in UPLOADED (decided or abandoned)
 
 
 class AuditReason(StrEnum):
@@ -46,6 +51,8 @@ class AuditReason(StrEnum):
     INVALID_REQUEST = "invalid_request"  # a body or field that failed validation; which one, and its text, are not recorded
     ENGAGEMENT_EXISTS = "engagement_exists"  # the subject already has an engagement in the production, in any state
     PAYLOAD_TOO_LARGE = "payload_too_large"  # a body over the limit; its size and content are not recorded
+    STATE_CONFLICT = "state_conflict"  # the delivery was not (or was no longer) in the state the request needs
+    UPLOAD_INTERRUPTED = "upload_interrupted"  # the client went away before the end of its body
 
 
 class ObjectType(StrEnum):
@@ -55,6 +62,7 @@ class ObjectType(StrEnum):
     ENGAGEMENT = "engagement"
     ASSET = "asset"
     SUBJECT = "subject"
+    DELIVERY = "delivery"
 
 
 class Outcome(StrEnum):

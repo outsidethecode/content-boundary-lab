@@ -30,6 +30,7 @@ OTHER_ISSUER = "https://other-issuer.example"
 KEY = tokens.new_key("key-1")
 VIEW, MANAGE = Action.VIEW_OWN_ENGAGEMENT, Action.MANAGE_ENGAGEMENTS
 READ_ASSET = Action.READ_ASSET
+INITIATE, UPLOAD = Action.INITIATE_DELIVERY, Action.UPLOAD_DELIVERY  # M0 §2 steps 3 and 4: the vendor's, no one else's
 REVOKED, EXPIRED = AuditReason.ENGAGEMENT_REVOKED, AuditReason.ENGAGEMENT_EXPIRED
 NO_ENGAGEMENT, NOT_PERMITTED = AuditReason.NO_ENGAGEMENT, AuditReason.ROLE_NOT_PERMITTED
 INVALID_IDENTIFIER = AuditReason.INVALID_IDENTIFIER
@@ -123,8 +124,11 @@ def _revoke(conn, engagement_id, seconds=60):
 
 
 def test_the_policy_is_small_closed_and_read_only():
-    assert set(Action) == {VIEW, MANAGE, READ_ASSET}
-    assert dict(authz.POLICY) == {"coordinator": {VIEW, MANAGE, READ_ASSET}, "vendor": {VIEW, READ_ASSET}}
+    assert set(Action) == {VIEW, MANAGE, READ_ASSET, INITIATE, UPLOAD}
+    assert dict(authz.POLICY) == {
+        "coordinator": {VIEW, MANAGE, READ_ASSET},
+        "vendor": {VIEW, READ_ASSET, INITIATE, UPLOAD},
+    }
     assert isinstance(authz.POLICY, MappingProxyType)
     with pytest.raises(TypeError):
         authz.POLICY["vendor"] = frozenset(Action)
@@ -139,6 +143,10 @@ def test_the_policy_is_small_closed_and_read_only():
         ("vendor-1", "vendor", MANAGE, False),
         ("coordinator-1", "coordinator", READ_ASSET, True),
         ("vendor-1", "vendor", READ_ASSET, True),
+        ("vendor-1", "vendor", INITIATE, True),
+        ("vendor-1", "vendor", UPLOAD, True),
+        ("coordinator-1", "coordinator", INITIATE, False),
+        ("coordinator-1", "coordinator", UPLOAD, False),
     ],
     ids=[
         "coordinator views",
@@ -147,6 +155,10 @@ def test_the_policy_is_small_closed_and_read_only():
         "vendor may not manage",
         "coordinator reads assets",
         "vendor reads assets",
+        "vendor initiates a delivery",
+        "vendor uploads to a delivery",
+        "coordinator may not initiate a delivery",
+        "coordinator may not upload to a delivery",
     ],
 )
 def test_the_role_policy_is_enforced_for_every_action(conn, subject, role, action, permitted):

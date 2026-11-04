@@ -17,6 +17,12 @@ INSERT_ASSET = "INSERT INTO assets (id, production_id, display_name, created_at)
 OK = sqlite3.SQLITE_OK
 DENY = sqlite3.SQLITE_DENY
 TRIGGERS = [
+    "deliveries_start_as_initiated",
+    "deliveries_are_not_replaced",
+    "deliveries_are_kept",
+    "deliveries_identity_is_fixed",
+    "deliveries_follow_the_lifecycle",
+    "deliveries_receipt_is_final",
     "audit_events_no_update",
     "audit_events_no_delete",
     "audit_events_no_overwrite",

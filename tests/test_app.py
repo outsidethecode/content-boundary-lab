@@ -20,6 +20,8 @@ ALLOWED_ROUTES: frozenset[tuple[str, frozenset[str]]] = frozenset(
         ("/productions/{production_id:path}/engagements", frozenset({"POST"})),
         ("/productions/{production_id:path}/engagements/{engagement_id:path}/revoke", frozenset({"POST"})),
         ("/productions/{production_id:path}/assets/{asset_id:path}", frozenset({"GET"})),
+        ("/productions/{production_id:path}/deliveries", frozenset({"POST"})),
+        ("/productions/{production_id:path}/deliveries/{delivery_id:path}/content", frozenset({"PUT"})),
     }
 )
 UNSERVED_PATHS = ["/", "/docs", "/docs/oauth2-redirect", "/redoc", "/openapi.json"]
@@ -32,6 +34,8 @@ def _complete(tmp_path: Path) -> dict:
         "clock": SystemClock(),
         "database_path": tmp_path / "unused.sqlite3",
         "asset_root": tmp_path / "assets",
+        "quarantine_root": tmp_path / "quarantine",
+        "max_upload_bytes": 1_048_576,
     }
 
 
@@ -75,7 +79,7 @@ def test_dependencies_is_a_frozen_dataclass(tmp_path):
 
 def test_dependencies_hold_exactly_the_approved_fields_and_no_selector():
     fields = [field.name for field in dataclasses.fields(Dependencies)]
-    assert fields == ["settings", "clock", "database_path", "asset_root"]
+    assert fields == ["settings", "clock", "database_path", "asset_root", "quarantine_root", "max_upload_bytes"]
 
 
 def test_dependencies_are_all_required_and_nothing_else_is_accepted(tmp_path):
@@ -101,12 +105,57 @@ def test_dependencies_are_all_required_and_nothing_else_is_accepted(tmp_path):
         ("database_path", None),
         ("asset_root", "/srv/assets"),
         ("asset_root", None),
+        ("quarantine_root", "/srv/quarantine"),
+        ("quarantine_root", None),
+        ("max_upload_bytes", "1024"),
+        ("max_upload_bytes", None),
+        ("max_upload_bytes", 1024.0),
+        ("max_upload_bytes", True),  # a bool is an int in Python, and is not a size
     ],
     ids=repr,
 )
 def test_dependencies_validate_their_types(tmp_path, name, invalid):
     with pytest.raises(TypeError, match=name):
         Dependencies(**{**_complete(tmp_path), name: invalid})
+
+
+@pytest.mark.parametrize("limit", [0, -1, 2**63])
+def test_the_upload_limit_is_a_positive_size_that_sqlite_can_store(tmp_path, limit):
+    with pytest.raises(ValueError, match="max_upload_bytes"):
+        Dependencies(**{**_complete(tmp_path), "max_upload_bytes": limit})
+    assert Dependencies(**{**_complete(tmp_path), "max_upload_bytes": 2**63 - 1}).max_upload_bytes == 2**63 - 1
+
+
+def test_the_quarantine_root_must_be_an_absolute_path(tmp_path):
+    with pytest.raises(ValueError, match="quarantine_root"):
+        Dependencies(**{**_complete(tmp_path), "quarantine_root": Path("relative/quarantine")})
+    assert Dependencies(**_complete(tmp_path)).quarantine_root.is_absolute()
+
+
+@pytest.mark.parametrize(
+    "layout",
+    ["the same directory", "inside the trusted root", "around the trusted root", "a symlink to the trusted root"],
+)
+def test_quarantine_and_trusted_storage_can_never_be_the_same_place_or_nested(tmp_path, layout):
+    trusted = tmp_path / "trusted"
+    trusted.mkdir()
+    quarantine = {
+        "the same directory": trusted,
+        "inside the trusted root": trusted / "quarantine",
+        "around the trusted root": tmp_path,
+        "a symlink to the trusted root": tmp_path / "link",
+    }[layout]
+    if layout == "a symlink to the trusted root":
+        quarantine.symlink_to(trusted)
+    with pytest.raises(ValueError, match="separate"):
+        Dependencies(**{**_complete(tmp_path), "asset_root": trusted, "quarantine_root": quarantine})
+    with pytest.raises(ValueError, match="separate"):  # the order does not matter
+        Dependencies(**{**_complete(tmp_path), "asset_root": quarantine, "quarantine_root": trusted})
+
+
+def test_sibling_directories_are_separate_roots(tmp_path):
+    deps = Dependencies(**{**_complete(tmp_path), "asset_root": tmp_path / "a", "quarantine_root": tmp_path / "ab"})
+    assert deps.asset_root != deps.quarantine_root  # a shared name prefix is not nesting
 
 
 def test_the_asset_root_must_be_an_absolute_path_so_it_cannot_depend_on_the_working_directory(tmp_path):
@@ -158,6 +207,8 @@ def test_openapi_schema_describes_only_the_approved_routes(app):
         "/productions/{production_id}/engagements",
         "/productions/{production_id}/engagements/{engagement_id}/revoke",
         "/productions/{production_id}/assets/{asset_id}",
+        "/productions/{production_id}/deliveries",
+        "/productions/{production_id}/deliveries/{delivery_id}/content",
     }
 
 
