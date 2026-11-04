@@ -26,6 +26,7 @@ class AuditAction(StrEnum):
 
     ENGAGEMENT_CREATED = "engagement.created"
     ENGAGEMENT_REVOKED = "engagement.revoked"
+    ENGAGEMENT_VIEWED = "engagement.viewed"
     ACCESS_DENIED = "access.denied"
     ASSET_READ = "asset.read"
 
@@ -39,6 +40,7 @@ class AuditReason(StrEnum):
     ROLE_NOT_PERMITTED = "role_not_permitted"
     NOT_FOUND_OR_FORBIDDEN = "not_found_or_forbidden"  # one code for both, so the record does not distinguish them
     INVALID_IDENTIFIER = "invalid_identifier"
+    INVALID_CREDENTIALS = "invalid_credentials"  # a failed authentication; the AuthFailure detail is not recorded
 
 
 class ObjectType(StrEnum):

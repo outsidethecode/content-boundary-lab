@@ -17,7 +17,7 @@ T0 = datetime(2026, 11, 3, 12, 0, 0, 123457, tzinfo=UTC)  # 1793707200123457 mic
 ISSUER = "https://idp.example"
 ACTOR = Actor(ISSUER, "coordinator-1")
 VOCABULARY = {
-    AuditAction: {"engagement.created", "engagement.revoked", "access.denied", "asset.read"},
+    AuditAction: {"engagement.created", "engagement.revoked", "engagement.viewed", "access.denied", "asset.read"},
     AuditReason: {
         "no_engagement",
         "engagement_expired",
@@ -25,6 +25,7 @@ VOCABULARY = {
         "role_not_permitted",
         "not_found_or_forbidden",
         "invalid_identifier",
+        "invalid_credentials",
     },
     ObjectType: {"production", "engagement", "asset", "subject"},
     Outcome: {"allowed", "denied", "recorded"},
