@@ -90,17 +90,27 @@ def advance_row(conn, delivery_id: str, state: str, now: int) -> None:
             scanned_at=now, valid_until=now + 10**12,
         )  # fmt: skip
     accepted = state in ("ACCEPTED", "PROMOTING", "PROMOTED")
+    promoting = state in ("PROMOTING", "PROMOTED")
+    if state == "PROMOTED" and conn.execute("SELECT state FROM deliveries WHERE id = ?", (delivery_id,)).fetchone()[0] == "PROMOTING":
+        conn.execute(  # the database refuses PROMOTED without the asset it names
+            "INSERT INTO assets (id, production_id, display_name, created_at, delivery_id, sha256, size) "
+            "SELECT d.asset_id, d.production_id, d.display_name, ?, d.id, d.accepted_sha256, d.sealed_size FROM deliveries AS d WHERE d.id = ?",
+            (now, delivery_id),
+        )  # fmt: skip
     conn.execute(
         "UPDATE deliveries SET state = ?, received_size = 7, received_sha256 = ?, uploaded_at = ?, "
         "sealed_size = COALESCE(?, sealed_size), sealed_sha256 = COALESCE(?, sealed_sha256), "
         "receipt_matched = COALESCE(?, receipt_matched), state_reason = ?, verdict_id = COALESCE(?, verdict_id), "
         "accepted_sha256 = COALESCE(?, accepted_sha256), accepted_at = COALESCE(?, accepted_at), "
-        "accepted_by = COALESCE(?, accepted_by) WHERE id = ?",
+        "accepted_by = COALESCE(?, accepted_by), promotion_attempt = COALESCE(?, promotion_attempt), "
+        "asset_id = COALESCE(?, asset_id) WHERE id = ?",
         (
             state, SEEDED_DIGEST, now, 7 if sealed else None, SEEDED_DIGEST if sealed else None, 1 if sealed else None,
             {"REJECTED": "checksum_mismatch", "SCAN_FAILED": "timeout"}.get(state), verdict_id,
             SEEDED_DIGEST if accepted else None, now if accepted else None,
             conn.execute("SELECT owner_subject_id FROM deliveries WHERE id = ?", (delivery_id,)).fetchone()[0] if accepted else None,
+            sha256_hex(b"attempt" + delivery_id.encode())[:32] if promoting else None,
+            sha256_hex(b"asset" + delivery_id.encode())[:32] if promoting else None,
             delivery_id,
         ),
     )  # fmt: skip
@@ -483,6 +493,40 @@ class Lab:
                 assert store.revoke_engagement(conn, FixedClock(at), self.engagements[key])
         finally:
             conn.close()
+
+    def accepted(self, content: bytes, subject: str = "vendor-1", production: str | None = None, **declared) -> str:
+        """A delivery uploaded by `subject`, sealed by the server and accepted by coordinator-1 for its sealed digest."""
+        delivery = self.sealed(content, subject, production, **declared)
+        assert self.accept(delivery, sha256_hex(content), "coordinator-1", production).status_code == 200
+        return delivery
+
+    def download(self, asset_id: str, subject: str | None = "vendor-1", production: str | None = None, **options):
+        """GET the asset as `subject` (or with exactly `token=`) through the production's url."""
+        path = f"/productions/{quote(production or self.alpha, safe='')}/assets/{quote(asset_id, safe='')}"
+        return self.send("GET", path, subject=subject, **options)
+
+    def asset_rows(self) -> list[dict]:
+        conn = REAL_CONNECT(self.path)
+        try:
+            return [dict(row) for row in conn.execute("SELECT * FROM assets ORDER BY rowid")]
+        finally:
+            conn.close()
+
+    def trusted_tree(self) -> list[str]:
+        """Every entry under the trusted root, relative and sorted, with nothing followed: for before/after comparisons."""
+        found = []
+        for current, directories, files in os.walk(self.asset_root, followlinks=False):
+            for name in directories + files:
+                found.append(str((Path(current) / name).relative_to(self.asset_root)))
+        return sorted(found)
+
+    def restore_audit_inserts(self) -> None:
+        """Undo make_audit_inserts_fail(): the next audit insert gets the next sequence number again."""
+        raw = sqlite3.connect(self.path, isolation_level=None)
+        try:
+            raw.execute("UPDATE sqlite_sequence SET seq = (SELECT COALESCE(MAX(seq), 0) FROM audit_events) WHERE name = 'audit_events'")
+        finally:
+            raw.close()
 
     def make_audit_inserts_fail(self) -> None:
         """The next audit insert hits the end of the AUTOINCREMENT range, a real SQLite failure, without any schema change."""

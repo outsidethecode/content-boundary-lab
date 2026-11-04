@@ -105,11 +105,17 @@ _SCHEMA: tuple[str, ...] = (
         CHECK (ends_at > created_at),
         CHECK (revoked_at IS NULL OR revoked_at >= created_at)
     ) STRICT""",
+    # An asset is a readable file in the trusted root. One that came from a delivery (M1K) also records which delivery, the
+    # digest of the bytes that were verified into the trusted root and their size; a seeded asset has none of the three.
     """CREATE TABLE assets (
         id TEXT NOT NULL PRIMARY KEY CHECK (length(id) = 32 AND id NOT GLOB '*[^0-9a-f]*'),
         production_id TEXT NOT NULL REFERENCES productions (id) ON DELETE RESTRICT,
         display_name TEXT NOT NULL CHECK (length(display_name) BETWEEN 1 AND 200),
-        created_at INTEGER NOT NULL
+        created_at INTEGER NOT NULL,
+        delivery_id TEXT UNIQUE REFERENCES deliveries (id) ON DELETE RESTRICT,
+        sha256 TEXT CHECK (length(sha256) = 64 AND sha256 NOT GLOB '*[^0-9a-f]*'),
+        size INTEGER CHECK (size >= 0),
+        CHECK ((delivery_id IS NULL) = (sha256 IS NULL) AND (delivery_id IS NULL) = (size IS NULL))
     ) STRICT""",
     "CREATE INDEX assets_by_production ON assets (production_id)",
     # A delivery is one vendor's declaration of bytes to be sent (M0 §2). It is owned by the subject that made it, in
@@ -143,6 +149,8 @@ _SCHEMA: tuple[str, ...] = (
         accepted_sha256 TEXT CHECK (length(accepted_sha256) = 64 AND accepted_sha256 NOT GLOB '*[^0-9a-f]*'),
         accepted_at INTEGER CHECK (accepted_at >= 0),
         accepted_by INTEGER REFERENCES subjects (id) ON DELETE RESTRICT,
+        promotion_attempt TEXT UNIQUE CHECK (length(promotion_attempt) = 32 AND promotion_attempt NOT GLOB '*[^0-9a-f]*'),
+        asset_id TEXT UNIQUE CHECK (length(asset_id) = 32 AND asset_id NOT GLOB '*[^0-9a-f]*'),
         CHECK ((state = 'INITIATED') = (received_sha256 IS NULL)),
         CHECK ((received_sha256 IS NULL) = (received_size IS NULL) AND (received_sha256 IS NULL) = (uploaded_at IS NULL)),
         CHECK ((sealed_sha256 IS NULL) = (sealed_size IS NULL) AND (sealed_sha256 IS NULL) = (receipt_matched IS NULL)),
@@ -157,7 +165,10 @@ _SCHEMA: tuple[str, ...] = (
         CHECK ((accepted_sha256 IS NULL) = (accepted_at IS NULL) AND (accepted_sha256 IS NULL) = (accepted_by IS NULL)),
         CHECK (accepted_sha256 IS NULL OR accepted_sha256 = sealed_sha256),
         CHECK (accepted_sha256 IS NULL OR state IN ('ACCEPTED', 'PROMOTING', 'PROMOTED', 'INTEGRITY_FAILED')),
-        CHECK (state NOT IN ('ACCEPTED', 'PROMOTING', 'PROMOTED') OR (accepted_sha256 IS NOT NULL AND verdict_id IS NOT NULL))
+        CHECK (state NOT IN ('ACCEPTED', 'PROMOTING', 'PROMOTED') OR (accepted_sha256 IS NOT NULL AND verdict_id IS NOT NULL)),
+        CHECK ((promotion_attempt IS NULL) = (asset_id IS NULL)),
+        CHECK (promotion_attempt IS NULL OR state IN ('PROMOTING', 'PROMOTED', 'INTEGRITY_FAILED')),
+        CHECK (state NOT IN ('PROMOTING', 'PROMOTED') OR promotion_attempt IS NOT NULL)
     ) STRICT""",
     # A delivery is created in INITIATED and never deleted, replaced or renamed (INSERT OR REPLACE would delete a row
     # without firing the delete trigger, so a BEFORE INSERT guard rejects any insert that collides on id, rowid or
@@ -224,6 +235,52 @@ _SCHEMA: tuple[str, ...] = (
         OR NEW.accepted_by IS NOT OLD.accepted_by OR NEW.verdict_id IS NOT OLD.verdict_id
     )
     BEGIN SELECT RAISE(ABORT, 'delivery acceptance is final'); END""",
+    # M1K. Promotion records, with the move out of ACCEPTED, the attempt and the key the asset will have; the record is
+    # written once. The move to PROMOTED needs the asset row it names, for exactly this delivery, production, accepted
+    # digest and size, and that row can be written only while the delivery is PROMOTING and only for the key it reserved:
+    # so the database, and not a caller's word, binds delivery, production, asset and digest, and the accepted digest is
+    # never replaced (deliveries_acceptance_is_final). Whether the file in the trusted root holds those bytes is
+    # promotion's to establish by hashing the bytes it copies; the database holds only the claim and the binding.
+    """CREATE TRIGGER deliveries_promotion_is_final BEFORE UPDATE ON deliveries
+    WHEN OLD.promotion_attempt IS NOT NULL AND (
+        NEW.promotion_attempt IS NOT OLD.promotion_attempt OR NEW.asset_id IS NOT OLD.asset_id
+    )
+    BEGIN SELECT RAISE(ABORT, 'delivery promotion record is final'); END""",
+    """CREATE TRIGGER deliveries_promoted_needs_its_asset BEFORE UPDATE ON deliveries
+    WHEN NEW.state = 'PROMOTED' AND OLD.state = 'PROMOTING' AND NOT EXISTS (
+        SELECT 1 FROM assets AS a
+        WHERE a.id = NEW.asset_id AND a.delivery_id = NEW.id AND a.production_id = NEW.production_id
+        AND a.sha256 = NEW.accepted_sha256 AND a.size = NEW.sealed_size
+    )
+    BEGIN SELECT RAISE(ABORT, 'a delivery is promoted only with the asset it named, for its accepted digest and size'); END""",
+    """CREATE TRIGGER assets_from_a_delivery_follow_it BEFORE INSERT ON assets
+    WHEN NEW.delivery_id IS NOT NULL AND NOT EXISTS (
+        SELECT 1 FROM deliveries AS d
+        WHERE d.id = NEW.delivery_id AND d.state = 'PROMOTING' AND d.asset_id = NEW.id AND d.production_id = NEW.production_id
+        AND d.accepted_sha256 = NEW.sha256 AND d.sealed_size = NEW.size
+    )
+    BEGIN SELECT RAISE(ABORT, 'an asset from a delivery is exactly the one it reserved, written while it is promoting'); END""",
+    # The binding between a delivery and its asset is written once, at insert, under the rule above, and is then neither
+    # changed, nor made by an update to an asset that had none, nor deleted, nor replaced (REPLACE deletes a conflicting row
+    # without firing the delete trigger, so a BEFORE INSERT guard rejects any insert that collides with a bound asset on id,
+    # rowid or delivery). An asset that has no delivery (a seeded one) is not bound and is not affected.
+    """CREATE TRIGGER assets_binding_is_final BEFORE UPDATE ON assets
+    WHEN NEW.delivery_id IS NOT OLD.delivery_id OR (
+        OLD.delivery_id IS NOT NULL AND (
+            NEW.id IS NOT OLD.id OR NEW.production_id IS NOT OLD.production_id
+            OR NEW.sha256 IS NOT OLD.sha256 OR NEW.size IS NOT OLD.size
+        )
+    )
+    BEGIN SELECT RAISE(ABORT, 'the binding of an asset to its delivery is final'); END""",
+    """CREATE TRIGGER assets_from_a_delivery_are_kept BEFORE DELETE ON assets
+    WHEN OLD.delivery_id IS NOT NULL
+    BEGIN SELECT RAISE(ABORT, 'an asset that came from a delivery is kept'); END""",
+    """CREATE TRIGGER assets_from_a_delivery_are_not_replaced BEFORE INSERT ON assets
+    WHEN EXISTS (
+        SELECT 1 FROM assets WHERE delivery_id IS NOT NULL
+        AND (id = NEW.id OR rowid = NEW.rowid OR delivery_id = NEW.delivery_id)
+    )
+    BEGIN SELECT RAISE(ABORT, 'an asset that came from a delivery is not replaced'); END""",
     # A scanner verdict is bound to the digest of the bytes it was made for, by the engine and policy that made it, and is
     # kept for audit for good: it is never changed, deleted or replaced. Whether one may be reused is decided when it is
     # read (same digest, engine, version, kind and policy, a no_detection verdict, not expired), never by editing it.
@@ -657,3 +714,23 @@ def add_asset(conn: sqlite3.Connection, clock: Clock, production_id: str, displa
         (asset_id, production_id, display_name, to_micros(clock.now())),
     )
     return asset_id
+
+
+def add_promoted_asset(
+    conn: sqlite3.Connection,
+    *,
+    asset_id: str,
+    production_id: str,
+    display_name: str,
+    delivery_id: str,
+    sha256: str,
+    size: int,
+    created_at: int,
+) -> None:
+    """The asset row of a promoted delivery, under the key the delivery reserved. The database refuses it unless that
+    delivery is PROMOTING and every one of these values is the one it holds (assets_from_a_delivery_follow_it)."""
+    conn.execute(
+        "INSERT INTO assets (id, production_id, display_name, created_at, delivery_id, sha256, size) "
+        "VALUES (?, ?, ?, ?, ?, ?, ?)",
+        (asset_id, production_id, display_name, created_at, delivery_id, sha256, size),
+    )

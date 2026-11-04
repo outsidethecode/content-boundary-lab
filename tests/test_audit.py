@@ -41,6 +41,8 @@ VOCABULARY = {
         "delivery.acceptance_refused",
         "delivery.rescan_started",
         "delivery.integrity_failed",
+        "delivery.promotion_started",
+        "delivery.promoted",
     },
     AuditReason: {
         "no_engagement",
@@ -357,6 +359,8 @@ NOT_VERDICT_BEARING = {
     "a rescan started": (AuditAction.DELIVERY_RESCAN_STARTED, Outcome.ALLOWED, None),
     "a rescan started for a stale verdict": (AuditAction.DELIVERY_RESCAN_STARTED, Outcome.ALLOWED, AuditReason.VERDICT_STALE),
     "an integrity failure": (AuditAction.DELIVERY_INTEGRITY_FAILED, Outcome.DENIED, AuditReason.SEALED_CONTENT_CHANGED),
+    "a promotion started": (AuditAction.DELIVERY_PROMOTION_STARTED, Outcome.ALLOWED, None),
+    "a delivery promoted": (AuditAction.DELIVERY_PROMOTED, Outcome.RECORDED, None),
 }
 
 
@@ -453,10 +457,47 @@ SYSTEM_ALLOWED = {
 SYSTEM_ACTIONS = frozenset(case[0] for case in SYSTEM_ALLOWED.values())
 
 
-def test_the_system_actor_is_one_named_identity_in_a_namespace_no_issuer_can_have():
+def test_the_system_actors_are_named_identities_in_a_namespace_no_issuer_can_have():
     assert audit.SYSTEM_RESCAN == Actor("system:content-boundary-lab", "rescan")
-    assert audit.SYSTEM_ACTORS == frozenset({audit.SYSTEM_RESCAN})
+    assert audit.SYSTEM_PROMOTE == Actor("system:content-boundary-lab", "promote")  # M1K: M0's "System job" for step 7
+    assert audit.SYSTEM_ACTORS == frozenset({audit.SYSTEM_RESCAN, audit.SYSTEM_PROMOTE})
     assert all(actor.issuer.startswith(audit.SYSTEM_ISSUER_PREFIX) for actor in audit.SYSTEM_ACTORS)
+
+
+# --- M1K: the promotion job is a second named system actor with its own, separate events ------------------------------------
+
+PROMOTE_ALLOWED = {
+    "a promotion started": (AuditAction.DELIVERY_PROMOTION_STARTED, Outcome.ALLOWED, None),
+    "a delivery promoted": (AuditAction.DELIVERY_PROMOTED, Outcome.RECORDED, None),
+    "an integrity failure": (AuditAction.DELIVERY_INTEGRITY_FAILED, Outcome.DENIED, AuditReason.SEALED_CONTENT_CHANGED),
+    "a refused promotion": (AuditAction.DELIVERY_REQUEST_REJECTED, Outcome.DENIED, AuditReason.STATE_CONFLICT),
+}
+PROMOTE_ACTIONS = frozenset(case[0] for case in PROMOTE_ALLOWED.values())
+
+
+@pytest.mark.parametrize("case", PROMOTE_ALLOWED.values(), ids=list(PROMOTE_ALLOWED))
+def test_the_promotion_job_may_record_the_events_of_a_promotion(conn, clock, case):
+    action, outcome, reason = case
+    with store.transaction(conn):
+        _record(conn, clock, action=action, outcome=outcome, reason=reason, actor=audit.SYSTEM_PROMOTE, **DELIVERY)
+    (event,) = _events(conn)
+    assert (event["actor_issuer"], event["actor_subject"], event["action"]) == ("system:content-boundary-lab", "promote", action.value)
+    assert event["engine_kind"] is None  # a promotion is not about a scanner verdict
+
+
+@pytest.mark.parametrize("action", [action for action in AuditAction if action not in PROMOTE_ACTIONS], ids=lambda action: action.value)
+def test_the_promotion_job_may_record_nothing_else(conn, clock, action):
+    kind = EngineKind.SYNTHETIC if action in (AuditAction.DELIVERY_ACCEPTED, AuditAction.DELIVERY_VIEWED) else None
+    with pytest.raises(ValueError, match="system actor"), store.transaction(conn):
+        _record(conn, clock, action=action, outcome=Outcome.ALLOWED, actor=audit.SYSTEM_PROMOTE, engine_kind=kind, **DELIVERY)
+    assert _events(conn) == []
+
+
+@pytest.mark.parametrize("action", [AuditAction.DELIVERY_PROMOTION_STARTED, AuditAction.DELIVERY_PROMOTED])
+def test_the_rescan_may_not_record_a_promotion(conn, clock, action):
+    with pytest.raises(ValueError, match="system actor"), store.transaction(conn):
+        _record(conn, clock, action=action, outcome=Outcome.ALLOWED, actor=audit.SYSTEM_RESCAN, **DELIVERY)
+    assert _events(conn) == []
 
 
 @pytest.mark.parametrize("case", SYSTEM_ALLOWED.values(), ids=list(SYSTEM_ALLOWED))

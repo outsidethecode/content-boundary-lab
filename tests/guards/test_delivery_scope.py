@@ -25,6 +25,7 @@ import pytest
 
 PACKAGE = Path(__file__).resolve().parents[2] / "src" / "content_boundary_lab"
 STORE, INGEST, TRUST, ACCEPTANCE = Path("store.py"), Path("ingest.py"), Path("trust.py"), Path("acceptance.py")
+PROMOTION = Path("promotion.py")
 SQL_START = re.compile(r"\s*(SELECT|INSERT|UPDATE|DELETE|CREATE|WITH|REPLACE|DROP|ALTER)\b", re.IGNORECASE)
 NAMES_DELIVERIES = re.compile(r"\bdeliveries\b", re.IGNORECASE)
 SCOPED_READ = (r"\bd\.id = \?", r"\bd\.production_id = \?", r"\bissuer = \?", r"\bsubject = \?", r"revoked_at IS NULL", r"ends_at > \?")
@@ -52,7 +53,23 @@ SETTERS = {
         {"SCAN_PASSED": {"state", "accepted_sha256", "accepted_at", "accepted_by"}},
         (r"\bid = \?", r"\bproduction_id = \?", r"\bsealed_sha256 = \?", r"\bverdict_id = \?"),
     ),
+    # M1K: promotion moves ACCEPTED -> PROMOTING (P1: the attempt and the asset key are recorded with it), and PROMOTING ->
+    # PROMOTED or INTEGRITY_FAILED (P4), each naming the delivery, its production and the accepted digest.
+    PROMOTION: (
+        {"ACCEPTED": {"state", "promotion_attempt", "asset_id"}, "PROMOTING": {"state"}},
+        (r"\bid = \?", r"\bproduction_id = \?", r"\baccepted_sha256 = \?"),
+    ),
 }
+# What else a statement must bind, by the module and the state it moves a delivery from.
+EXTRA_BINDING = {
+    (PROMOTION, "ACCEPTED"): (r"\bverdict_id = \?",),
+    (PROMOTION, "PROMOTING"): (r"\bpromotion_attempt = \?", r"\basset_id = \?"),
+}
+PROMOTION_READ = re.compile(r"SELECT [\w., ]+ FROM deliveries AS d WHERE d\.id = \? AND d\.production_id = \?$")
+PROMOTION_LISTINGS = (  # the recovery pass: which deliveries are promoting, and which carry a promotion record
+    re.compile(r"SELECT d\.id, d\.production_id FROM deliveries AS d WHERE d\.state = 'PROMOTING' ORDER BY d\.rowid$"),
+    re.compile(r"SELECT [\w., ]+ FROM deliveries AS d WHERE d\.promotion_attempt IS NOT NULL ORDER BY d\.rowid$"),
+)
 RECONCILIATION_READS = (
     re.compile(r"SELECT state FROM deliveries WHERE storage_key = \?$"),
     re.compile(r"SELECT id, storage_key FROM deliveries WHERE state != 'INITIATED'$"),
@@ -93,6 +110,9 @@ def sql_violations(relative: Path, source: str) -> list[str]:
                 elif relative == ACCEPTANCE:
                     if not all(re.search(pattern, text) for pattern in COORDINATOR_READ):
                         problems.append(f"{where} that is not the coordinator-scoped read")
+                elif relative == PROMOTION:
+                    if not PROMOTION_READ.fullmatch(text) and not any(pattern.fullmatch(text) for pattern in PROMOTION_LISTINGS):
+                        problems.append(f"{where} that is neither the delivery-and-production read nor a recovery listing")
                 elif not all(re.search(pattern, text) for pattern in OWNER_READ) and not any(
                     pattern.fullmatch(text) for pattern in RECONCILIATION_READS
                 ):
@@ -102,7 +122,8 @@ def sql_violations(relative: Path, source: str) -> list[str]:
                 columns = {part.split("=")[0].strip() for part in assignments.group(1).split(",")} if assignments else {"?"}
                 from_state = re.search(r"\bstate = '(\w+)'\s*$", text)
                 changeable = changeable_from.get(from_state.group(1) if from_state else "", set())
-                missing = [pattern for pattern in binding if not re.search(pattern, text)]
+                extra = EXTRA_BINDING.get((relative, from_state.group(1) if from_state else ""), ())
+                missing = [pattern for pattern in (*binding, *extra) if not re.search(pattern, text)]
                 if not from_state or from_state.group(1) not in changeable_from:
                     missing.append("a state it may move a delivery from")
                 if missing or not columns <= changeable:
@@ -295,8 +316,62 @@ def test_the_guard_accepts_the_rescans_read_and_its_two_restarts_in_trust_only()
             assert sql_violations(other, _module(statement)), other
 
 
+# --- M1K: promotion's reads and its three compare-and-sets -----------------------------------------------------------------------
+
+PROMOTE_READ = (
+    "SELECT d.id, d.production_id, d.state, d.storage_key, d.sealed_size, d.accepted_sha256, d.promotion_attempt, d.asset_id "
+    "FROM deliveries AS d WHERE d.id = ? AND d.production_id = ?"
+)
+PROMOTE_LISTING = "SELECT d.id, d.production_id FROM deliveries AS d WHERE d.state = 'PROMOTING' ORDER BY d.rowid"
+PROMOTE_RECORDS = "SELECT d.id, d.production_id, d.state FROM deliveries AS d WHERE d.promotion_attempt IS NOT NULL ORDER BY d.rowid"
+PROMOTE_BEGIN = (
+    "UPDATE deliveries SET state = 'PROMOTING', promotion_attempt = ?, asset_id = ? "
+    "WHERE id = ? AND production_id = ? AND accepted_sha256 = ? AND verdict_id = ? AND state = 'ACCEPTED'"
+)
+PROMOTE_END = (
+    "UPDATE deliveries SET state = '{to}' "
+    "WHERE id = ? AND production_id = ? AND accepted_sha256 = ? AND promotion_attempt = ? AND asset_id = ? AND state = 'PROMOTING'"
+)
+PROMOTION_BAD = {
+    "a read by id alone": "SELECT d.id FROM deliveries AS d WHERE d.id = ?",
+    "a read that adds a condition it should not skip": PROMOTE_READ + " OR 1 = 1",
+    "a read of every delivery": "SELECT d.id FROM deliveries AS d",
+    "a begin that does not bind the digest": PROMOTE_BEGIN.replace(" AND accepted_sha256 = ?", ""),
+    "a begin that does not bind the verdict": PROMOTE_BEGIN.replace(" AND verdict_id = ?", ""),
+    "a begin without the production": PROMOTE_BEGIN.replace(" AND production_id = ?", ""),
+    "a begin from any state": PROMOTE_BEGIN.replace(" AND state = 'ACCEPTED'", ""),
+    "a begin from the scan": PROMOTE_BEGIN.replace("'ACCEPTED'", "'SCAN_PASSED'"),
+    "a begin that rewrites the acceptance": PROMOTE_BEGIN.replace("SET state", "SET accepted_sha256 = ?, state"),
+    "a begin that rewrites the seal": PROMOTE_BEGIN.replace("SET state", "SET sealed_sha256 = ?, state"),
+    "an end that does not bind the attempt": PROMOTE_END.format(to="PROMOTED").replace(" AND promotion_attempt = ?", ""),
+    "an end that does not bind the asset key": PROMOTE_END.format(to="PROMOTED").replace(" AND asset_id = ?", ""),
+    "an end that does not bind the digest": PROMOTE_END.format(to="PROMOTED").replace(" AND accepted_sha256 = ?", ""),
+    "an end from any state": PROMOTE_END.format(to="PROMOTED").replace(" AND state = 'PROMOTING'", ""),
+    "an end from the acceptance": PROMOTE_END.format(to="PROMOTED").replace("'PROMOTING'", "'ACCEPTED'"),
+    "an end that rebinds the accepted digest": PROMOTE_END.format(to="PROMOTED").replace("SET state", "SET accepted_sha256 = ?, state"),
+    "an end that swaps the asset key": PROMOTE_END.format(to="PROMOTED").replace("SET state", "SET asset_id = ?, state"),
+    "a delete": "DELETE FROM deliveries WHERE id = ?",
+    "an insert": "INSERT INTO deliveries (id) VALUES (?)",
+}
+
+
+@pytest.mark.parametrize("statement", PROMOTION_BAD.values(), ids=list(PROMOTION_BAD))
+def test_the_guard_flags_a_promotion_that_reads_or_moves_a_delivery_beyond_its_three_steps(statement):
+    assert sql_violations(PROMOTION, _module(statement))
+
+
+def test_the_guard_accepts_promotions_reads_and_compare_and_sets_in_promotion_only():
+    good = (PROMOTE_READ, PROMOTE_LISTING, PROMOTE_RECORDS, PROMOTE_BEGIN, PROMOTE_END.format(to="PROMOTED"), PROMOTE_END.format(to="INTEGRITY_FAILED"))
+    for statement in good:
+        assert sql_violations(PROMOTION, _module(statement)) == [], statement
+        for other in (INGEST, TRUST, ACCEPTANCE, Path("management.py"), STORE):
+            assert sql_violations(other, _module(statement)), (other, statement)
+    for statement in (CAS, SEAL_START, SEAL_END, ACCEPT, RESCAN_READ):
+        assert sql_violations(PROMOTION, _module(statement)), statement  # and promotion may not do anyone else's
+
+
 NAMES_VERDICTS = re.compile(r"\bverdicts\b", re.IGNORECASE)
-VERDICT_BY_ID = re.compile(r"SELECT [\w., ]+ FROM verdicts WHERE id = \?$")  # a verdict row is immutable; its id is the delivery's
+VERDICT_BY_ID =re.compile(r"SELECT [\w., ]+ FROM verdicts WHERE id = \?$")  # a verdict row is immutable; its id is the delivery's
 CACHE_READ = (
     r"\bsha256 = \?", r"\bengine_id = \?", r"\bengine_version = \?", r"\bengine_kind = \?", r"\bpolicy_fingerprint = \?",
     r"\bverdict = 'no_detection'", r"\bvalid_until > \?",
@@ -432,17 +507,28 @@ def test_the_guard_sees_every_way_of_reaching_the_system_flow(source):
     assert callers_of(source, "run_system")
 
 
-def test_only_the_rescan_refers_to_the_transaction_that_runs_as_the_system():
-    """run_system() authenticates and authorises nobody: it is the lab's own act, so only trust.rescan() may start one."""
+def test_only_the_rescan_and_the_promotion_job_refer_to_the_transaction_that_runs_as_the_system():
+    """run_system() authenticates and authorises nobody: it is the lab's own act, so only trust.rescan() and promotion's one
+    helper may start one."""
     users = [path.relative_to(PACKAGE) for path in sorted(PACKAGE.rglob("*.py")) if callers_of(path.read_text(), "run_system")]
-    assert users == [TRUST]  # request_flow.py defines it; a definition is not a reference
+    assert users == [PROMOTION, TRUST]  # request_flow.py defines it; a definition is not a reference
     assert functions_referring_to((PACKAGE / TRUST).read_text(), "run_system") == {"rescan"}
+    assert functions_referring_to((PACKAGE / PROMOTION).read_text(), "run_system") == {"_transaction"}
 
 
-def test_the_system_actor_is_named_only_where_the_rescan_runs():
-    users = [path.relative_to(PACKAGE) for path in sorted(PACKAGE.rglob("*.py")) if callers_of(path.read_text(), "SYSTEM_RESCAN")]
-    assert users == [Path("audit.py"), TRUST]  # audit defines it and checks who may use it; trust.rescan runs under it
-    assert functions_referring_to((PACKAGE / TRUST).read_text(), "SYSTEM_RESCAN") == {"rescan"}
+def test_each_system_actor_is_named_only_where_its_work_runs():
+    for name, home, function in (("SYSTEM_RESCAN", TRUST, "rescan"), ("SYSTEM_PROMOTE", PROMOTION, "_transaction")):
+        users = [path.relative_to(PACKAGE) for path in sorted(PACKAGE.rglob("*.py")) if callers_of(path.read_text(), name)]
+        assert users == sorted([Path("audit.py"), home]), name  # audit defines it and checks who may use it
+        assert functions_referring_to((PACKAGE / home).read_text(), name) == {function}, name
+
+
+def test_promotion_writes_nowhere_but_through_the_two_storage_modules_and_has_no_route():
+    source = (PACKAGE / PROMOTION).read_text()
+    assert not file_operations(source)  # every open, link, unlink and mkdir is in assets.py or quarantine.py
+    assert not functions_referring_to(source, "proceed") and not functions_referring_to(source, "decide")
+    app_names = identifiers((PACKAGE / "app.py").read_text())
+    assert "promotion" not in app_names and not any("promot" in name.lower() for name in app_names)
 
 
 def test_acceptance_proceeds_in_one_transaction_and_never_calls_the_scanner_or_a_file():

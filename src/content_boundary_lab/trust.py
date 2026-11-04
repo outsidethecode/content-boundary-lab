@@ -243,6 +243,22 @@ def read_verdict(conn: sqlite3.Connection, verdict_id: str | None) -> VerdictRec
     return None if row is None else VerdictRecord(*row)
 
 
+def verdict_binding_problem(record: VerdictRecord | None, sealed: ContentIdentity) -> audit.AuditReason | None:
+    """verdict_not_applicable unless `record` is a `no_detection` verdict for the sealed digest H, which its scanner also
+    reported it had read; None if it is. This is all that promotion asks of a verdict: which engine made it and whether it
+    has expired are acceptance's questions (verdict_problem), and the Addendum records that validity is not rechecked at
+    promotion. It reads no clock and no engine."""
+    if record is not None and not isinstance(record, VerdictRecord):
+        raise TypeError("record must be a VerdictRecord or None")
+    if not isinstance(sealed, ContentIdentity):
+        raise TypeError("sealed must be a ContentIdentity: the verdict is checked against the server's digest of the bytes")
+    if record is None:
+        return audit.AuditReason.VERDICT_NOT_APPLICABLE
+    if record.verdict != Verdict.NO_DETECTION.value or record.sha256 != sealed.sha256 or record.scanned_sha256 != sealed.sha256:
+        return audit.AuditReason.VERDICT_NOT_APPLICABLE
+    return None
+
+
 def verdict_problem(
     record: VerdictRecord | None, sealed: ContentIdentity, engine: EngineIdentity, now_micros: int
 ) -> audit.AuditReason | None:
@@ -255,18 +271,13 @@ def verdict_problem(
     it counts only while `valid_until > now`. A rescan can replace a stale verdict. The instant is the caller's one clock
     read for its transaction, so that the decision and the record of it agree.
     """
-    if record is not None and not isinstance(record, VerdictRecord):
-        raise TypeError("record must be a VerdictRecord or None")
-    if not isinstance(sealed, ContentIdentity):
-        raise TypeError("sealed must be a ContentIdentity: the verdict is checked against the server's digest of the bytes")
     if not isinstance(engine, EngineIdentity):
         raise TypeError("engine must be an EngineIdentity")
     if type(now_micros) is not int:
         raise TypeError("now_micros must be an int (a bool is not accepted)")
-    if record is None:
-        return audit.AuditReason.VERDICT_NOT_APPLICABLE
-    if record.verdict != Verdict.NO_DETECTION.value or record.sha256 != sealed.sha256 or record.scanned_sha256 != sealed.sha256:
-        return audit.AuditReason.VERDICT_NOT_APPLICABLE
+    binding = verdict_binding_problem(record, sealed)
+    if binding is not None:
+        return binding
     if (record.engine_id, record.engine_version, record.engine_kind, record.policy_fingerprint) != (
         engine.id,
         engine.version,

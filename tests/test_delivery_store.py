@@ -22,6 +22,8 @@ T0 = datetime(2026, 11, 3, 12, tzinfo=UTC)
 ISSUER = "https://idp.example"
 SHA = "a" * 64
 OTHER_SHA = "b" * 64
+ATTEMPT, OTHER_ATTEMPT = "c" * 32, "d" * 32
+ASSET, OTHER_ASSET = "e" * 32, "f" * 32
 HEX32 = re.compile(r"[0-9a-f]{32}")
 
 STATES = (
@@ -124,18 +126,36 @@ def advance(world, delivery_id, state):
         return
     sealed = state in SEALED_STATES
     accepted = state in ACCEPTED_STATES
+    promoting = state in ("PROMOTING", "PROMOTED")
+    if state == "PROMOTED" and row(world, delivery_id)["state"] == "PROMOTING":
+        add_asset_for(world, delivery_id)  # the database refuses PROMOTED without the asset it names
     world.conn.execute(
         "UPDATE deliveries SET state = ?, received_size = 7, received_sha256 = ?, uploaded_at = 5, "
         "sealed_size = COALESCE(?, sealed_size), sealed_sha256 = COALESCE(?, sealed_sha256), "
         "receipt_matched = COALESCE(?, receipt_matched), state_reason = ?, verdict_id = COALESCE(?, verdict_id), "
         "accepted_sha256 = COALESCE(?, accepted_sha256), accepted_at = COALESCE(?, accepted_at), "
-        "accepted_by = COALESCE(?, accepted_by) WHERE id = ?",
+        "accepted_by = COALESCE(?, accepted_by), promotion_attempt = COALESCE(?, promotion_attempt), "
+        "asset_id = COALESCE(?, asset_id) WHERE id = ?",
         (
             state, SHA, 7 if sealed else None, SHA if sealed else None, 1 if sealed else None,
             REASONS.get(state), world.verdict if state in WITH_VERDICT else None,
-            SHA if accepted else None, 6 if accepted else None, world.vendor if accepted else None, delivery_id,
+            SHA if accepted else None, 6 if accepted else None, world.vendor if accepted else None,
+            ATTEMPT if promoting else None, ASSET if promoting else None, delivery_id,
         ),
     )  # fmt: skip
+
+
+def add_asset_for(world, delivery, **overrides):
+    """The trusted asset row of a delivery, written the way promotion writes it (the delivery must be PROMOTING)."""
+    values = {
+        "id": ASSET, "production_id": world.alpha, "display_name": "clip.mov", "created_at": 9,
+        "delivery_id": delivery, "sha256": SHA, "size": 7, **overrides,
+    }  # fmt: skip
+    world.conn.execute(
+        "INSERT INTO assets (id, production_id, display_name, created_at, delivery_id, sha256, size) "
+        "VALUES (:id, :production_id, :display_name, :created_at, :delivery_id, :sha256, :size)",
+        values,
+    )
 
 
 def at(world, delivery_id, state):
@@ -642,6 +662,244 @@ def test_a_rescan_returns_a_delivery_to_sealing_with_its_seal_and_without_its_ve
         )
         stored = row(world, created.id)
         assert (stored["state"], stored["sealed_sha256"], stored["verdict_id"], stored["state_reason"]) == ("SEALING", SHA, None, None)
+
+
+# --- M1K: the promotion record, and the asset a delivery becomes ------------------------------------------------------------
+#
+# Promotion records, with the move out of ACCEPTED, the attempt id and the server-generated key the asset will have (P1);
+# it writes the asset row and the move to PROMOTED together (P4). The database refuses a record outside PROMOTING and after,
+# half a record, a change to it, PROMOTED without the asset it names, and an asset that names a delivery which is not
+# PROMOTING for exactly that asset, production, digest and size.
+
+BEGIN = "UPDATE deliveries SET state = 'PROMOTING', promotion_attempt = :attempt, asset_id = :asset WHERE id = :id"
+
+
+def accepted_delivery(world):
+    created = new_delivery(world)
+    at(world, created.id, "ACCEPTED")
+    return created
+
+
+def begin_promotion(world, delivery_id, **overrides):
+    return world.conn.execute(BEGIN, {"attempt": ATTEMPT, "asset": ASSET, "id": delivery_id, **overrides})
+
+
+def test_a_new_delivery_has_no_promotion_record(world):
+    stored = row(world, new_delivery(world).id)
+    assert stored["promotion_attempt"] is None and stored["asset_id"] is None
+
+
+@pytest.mark.parametrize("state", ["INITIATED", "UPLOADED", "SEALING", "REJECTED", "SCAN_FAILED", "SCAN_PASSED", "ACCEPTED"])
+def test_nothing_is_promoted_before_it_is_promoting(world, state):
+    created = new_delivery(world)
+    at(world, created.id, state)
+    with pytest.raises(sqlite3.IntegrityError):
+        world.conn.execute(
+            "UPDATE deliveries SET promotion_attempt = ?, asset_id = ? WHERE id = ?", (ATTEMPT, ASSET, created.id)
+        )
+    assert row(world, created.id)["promotion_attempt"] is None
+
+
+def test_promotion_begins_with_the_attempt_and_the_key_of_the_asset(world):
+    created = accepted_delivery(world)
+    begin_promotion(world, created.id)
+    stored = row(world, created.id)
+    assert (stored["state"], stored["promotion_attempt"], stored["asset_id"]) == ("PROMOTING", ATTEMPT, ASSET)
+    assert stored["accepted_sha256"] == stored["sealed_sha256"] == SHA
+
+
+PROMOTION_HOSTILE = {
+    "no attempt": {"attempt": None},
+    "no asset key": {"asset": None},
+    "an attempt in capitals": {"attempt": ATTEMPT.upper()},
+    "a short attempt": {"attempt": ATTEMPT[:-1]},
+    "an asset key that is not hexadecimal": {"asset": "g" * 32},
+    "an asset key with a path in it": {"asset": "../" + "a" * 29},
+    "an asset key that is too long": {"asset": ASSET + "0"},
+}
+
+
+@pytest.mark.parametrize("changes", PROMOTION_HOSTILE.values(), ids=list(PROMOTION_HOSTILE))
+def test_an_attempt_and_an_asset_key_come_together_and_well_formed(world, changes):
+    created = accepted_delivery(world)
+    with pytest.raises(sqlite3.IntegrityError):
+        begin_promotion(world, created.id, **changes)
+    assert row(world, created.id)["state"] == "ACCEPTED"
+
+
+def test_two_deliveries_never_share_an_attempt_or_an_asset_key(world):
+    first, second = accepted_delivery(world), accepted_delivery(world)
+    begin_promotion(world, first.id)
+    for changes in ({"asset": OTHER_ASSET}, {"attempt": OTHER_ATTEMPT}):  # each of the pair repeated
+        with pytest.raises(sqlite3.IntegrityError):
+            begin_promotion(world, second.id, **changes)
+    assert row(world, second.id)["state"] == "ACCEPTED"
+
+
+def test_promoting_needs_the_promotion_record(world):
+    created = accepted_delivery(world)
+    with pytest.raises(sqlite3.IntegrityError):
+        world.conn.execute("UPDATE deliveries SET state = 'PROMOTING' WHERE id = ?", (created.id,))
+    assert row(world, created.id)["state"] == "ACCEPTED"
+
+
+def promoting(world):
+    created = new_delivery(world)
+    at(world, created.id, "PROMOTING")
+    return created
+
+
+@pytest.mark.parametrize("state", ["PROMOTING", "PROMOTED", "INTEGRITY_FAILED"])
+def test_the_promotion_record_is_written_once_and_never_changed(world, state):
+    created = new_delivery(world)
+    at(world, created.id, "PROMOTING")
+    if state == "PROMOTED":
+        add_asset_for(world, created.id)
+        world.conn.execute("UPDATE deliveries SET state = 'PROMOTED' WHERE id = ?", (created.id,))
+    elif state == "INTEGRITY_FAILED":
+        world.conn.execute("UPDATE deliveries SET state = 'INTEGRITY_FAILED' WHERE id = ?", (created.id,))
+    before = row(world, created.id)
+    for column, value in (("promotion_attempt", OTHER_ATTEMPT), ("asset_id", OTHER_ASSET), ("promotion_attempt", None), ("asset_id", None)):
+        with pytest.raises(sqlite3.IntegrityError):
+            world.conn.execute(f"UPDATE deliveries SET {column} = ? WHERE id = ?", (value, created.id))
+    world.conn.execute("UPDATE deliveries SET promotion_attempt = ?, asset_id = ? WHERE id = ?", (ATTEMPT, ASSET, created.id))
+    assert row(world, created.id) == before  # writing the same values is not a change
+    assert before["accepted_sha256"] == SHA
+
+
+def test_a_delivery_that_failed_while_promoting_keeps_its_record_and_one_that_failed_sealing_has_none(world):
+    sealing_failure, promotion_failure = new_delivery(world), promoting(world)
+    at(world, sealing_failure.id, "INTEGRITY_FAILED")
+    world.conn.execute("UPDATE deliveries SET state = 'INTEGRITY_FAILED' WHERE id = ?", (promotion_failure.id,))
+    assert row(world, sealing_failure.id)["promotion_attempt"] is None
+    assert (row(world, promotion_failure.id)["promotion_attempt"], row(world, promotion_failure.id)["asset_id"]) == (ATTEMPT, ASSET)
+
+
+def test_promoted_needs_the_asset_it_names_and_not_before(world):
+    created = promoting(world)
+    with pytest.raises(sqlite3.IntegrityError):
+        world.conn.execute("UPDATE deliveries SET state = 'PROMOTED' WHERE id = ?", (created.id,))
+    assert row(world, created.id)["state"] == "PROMOTING"
+    add_asset_for(world, created.id)
+    world.conn.execute("UPDATE deliveries SET state = 'PROMOTED' WHERE id = ?", (created.id,))
+    assert row(world, created.id)["state"] == "PROMOTED"
+
+
+ASSET_HOSTILE = {
+    "an asset key other than the one reserved": {"id": OTHER_ASSET},
+    "another production": {"production_id": "bravo"},
+    "another digest": {"sha256": OTHER_SHA},
+    "another size": {"size": 8},
+    "a digest in capitals": {"sha256": SHA.upper()},
+    "a negative size": {"size": -1},
+    "a delivery that does not exist": {"delivery_id": "9" * 32},
+}
+
+
+@pytest.mark.parametrize("changes", ASSET_HOSTILE.values(), ids=list(ASSET_HOSTILE))
+def test_an_asset_from_a_delivery_must_be_exactly_the_one_that_delivery_reserved(world, changes):
+    created = promoting(world)
+    if changes.get("production_id") == "bravo":
+        changes = {**changes, "production_id": world.bravo}
+    with pytest.raises(sqlite3.IntegrityError):
+        add_asset_for(world, created.id, **changes)
+    assert world.conn.execute("SELECT COUNT(*) FROM assets").fetchone()[0] == 0
+
+
+@pytest.mark.parametrize("state", ["ACCEPTED", "PROMOTED", "INTEGRITY_FAILED"])
+def test_an_asset_is_written_only_while_its_delivery_is_promoting(world, state):
+    created = accepted_delivery(world) if state == "ACCEPTED" else promoting(world)
+    if state == "PROMOTED":
+        add_asset_for(world, created.id)
+        world.conn.execute("UPDATE deliveries SET state = 'PROMOTED' WHERE id = ?", (created.id,))
+    elif state == "INTEGRITY_FAILED":
+        world.conn.execute("UPDATE deliveries SET state = 'INTEGRITY_FAILED' WHERE id = ?", (created.id,))
+    count = world.conn.execute("SELECT COUNT(*) FROM assets").fetchone()[0]
+    with pytest.raises(sqlite3.IntegrityError):
+        add_asset_for(world, created.id, id=OTHER_ASSET if state == "PROMOTED" else ASSET)
+    assert world.conn.execute("SELECT COUNT(*) FROM assets").fetchone()[0] == count
+
+
+def test_one_delivery_becomes_one_asset(world):
+    created = promoting(world)
+    add_asset_for(world, created.id)
+    with pytest.raises(sqlite3.IntegrityError):
+        add_asset_for(world, created.id)
+
+
+def test_an_asset_that_came_from_a_delivery_is_never_rebound(world):
+    created = promoting(world)
+    add_asset_for(world, created.id)
+    for column, value in (("sha256", OTHER_SHA), ("size", 8), ("delivery_id", None), ("production_id", world.bravo), ("sha256", None)):
+        with pytest.raises(sqlite3.IntegrityError):
+            world.conn.execute(f"UPDATE assets SET {column} = ? WHERE id = ?", (value, ASSET))
+    world.conn.execute("UPDATE assets SET sha256 = ?, size = 7 WHERE id = ?", (SHA, ASSET))  # the same values: not a change
+
+
+def bound_asset(world):
+    created = promoting(world)
+    add_asset_for(world, created.id)
+    return created
+
+
+def test_an_asset_that_came_from_a_delivery_is_never_deleted(world):
+    bound_asset(world)
+    with pytest.raises(sqlite3.IntegrityError):
+        world.conn.execute("DELETE FROM assets WHERE id = ?", (ASSET,))
+    assert world.conn.execute("SELECT COUNT(*) FROM assets WHERE id = ?", (ASSET,)).fetchone()[0] == 1
+
+
+def test_a_seeded_asset_can_still_be_deleted_because_nothing_binds_it(world):
+    seeded = store.add_asset(world.conn, world.clock, world.alpha, "seed.mov")
+    world.conn.execute("DELETE FROM assets WHERE id = ?", (seeded,))
+    assert world.conn.execute("SELECT COUNT(*) FROM assets WHERE id = ?", (seeded,)).fetchone()[0] == 0
+
+
+REPLACEMENTS = {
+    "by an unbound asset with the same id": "INSERT OR REPLACE INTO assets (id, production_id, display_name, created_at) VALUES ('%s', '%s', 'x', 1)",
+    "by an unbound asset at the same row": "INSERT OR REPLACE INTO assets (rowid, id, production_id, display_name, created_at) VALUES (1, '%s', '%s', 'x', 1)",
+}
+
+
+@pytest.mark.parametrize("statement", REPLACEMENTS.values(), ids=list(REPLACEMENTS))
+def test_an_asset_that_came_from_a_delivery_is_never_replaced(world, statement):
+    bound_asset(world)
+    before = dict(world.conn.execute("SELECT * FROM assets WHERE id = ?", (ASSET,)).fetchone())
+    other_id = OTHER_ASSET if "rowid" in statement else ASSET
+    with pytest.raises(sqlite3.IntegrityError):
+        world.conn.execute(statement % (other_id, world.alpha))
+    assert dict(world.conn.execute("SELECT * FROM assets WHERE id = ?", (ASSET,)).fetchone()) == before
+
+
+def test_an_asset_that_came_from_a_delivery_is_never_replaced_by_one_for_the_same_delivery(world):
+    created = bound_asset(world)
+    with pytest.raises(sqlite3.IntegrityError):
+        world.conn.execute(
+            "INSERT OR REPLACE INTO assets (id, production_id, display_name, created_at, delivery_id, sha256, size) VALUES (?, ?, 'x', 1, ?, ?, 7)",
+            (OTHER_ASSET, world.alpha, created.id, SHA),
+        )
+    assert [r[0] for r in world.conn.execute("SELECT id FROM assets")] == [ASSET]
+
+
+def test_an_asset_that_was_not_bound_when_it_was_written_cannot_be_bound_to_a_delivery_afterwards(world):
+    seeded = store.add_asset(world.conn, world.clock, world.alpha, "seed.mov")
+    created = promoting(world)
+    with pytest.raises(sqlite3.IntegrityError):
+        world.conn.execute(
+            "UPDATE assets SET delivery_id = ?, sha256 = ?, size = 7 WHERE id = ?", (created.id, SHA, seeded)
+        )  # the insert-time rule must not be bypassable by an update
+    stored = dict(world.conn.execute("SELECT * FROM assets WHERE id = ?", (seeded,)).fetchone())
+    assert (stored["delivery_id"], stored["sha256"], stored["size"]) == (None, None, None)
+
+
+def test_a_seeded_asset_has_no_delivery_digest_or_size_and_cannot_have_just_some(world):
+    seeded = store.add_asset(world.conn, world.clock, world.alpha, "seed.mov")
+    stored = dict(world.conn.execute("SELECT * FROM assets WHERE id = ?", (seeded,)).fetchone())
+    assert (stored["delivery_id"], stored["sha256"], stored["size"]) == (None, None, None)
+    created = promoting(world)
+    for changes in ({"sha256": None}, {"size": None}, {"delivery_id": None}):
+        with pytest.raises(sqlite3.IntegrityError):
+            add_asset_for(world, created.id, **changes)
 
 
 VERDICT_HOSTILE = {

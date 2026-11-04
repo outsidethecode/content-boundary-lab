@@ -47,6 +47,8 @@ class AuditAction(StrEnum):
     DELIVERY_ACCEPTANCE_REFUSED = "delivery.acceptance_refused"  # an authorised acceptance that the delivery or the request failed
     DELIVERY_RESCAN_STARTED = "delivery.rescan_started"  # SCAN_FAILED or SCAN_PASSED -> SEALING, by the internal rescan
     DELIVERY_INTEGRITY_FAILED = "delivery.integrity_failed"  # INTEGRITY_FAILED: the bytes no longer hash to the sealed digest
+    DELIVERY_PROMOTION_STARTED = "delivery.promotion_started"  # ACCEPTED -> PROMOTING: the intent, the attempt and the asset key
+    DELIVERY_PROMOTED = "delivery.promoted"  # PROMOTING -> PROMOTED: verified bytes are published as the delivery's trusted asset
 
 
 class AuditReason(StrEnum):
@@ -178,7 +180,8 @@ class Actor:
 # audit trail and a bound on what may be recorded under it; it is not a credential and authenticates nothing.
 SYSTEM_ISSUER_PREFIX = "system:"
 SYSTEM_RESCAN = Actor("system:content-boundary-lab", "rescan")
-SYSTEM_ACTORS = frozenset({SYSTEM_RESCAN})
+SYSTEM_PROMOTE = Actor("system:content-boundary-lab", "promote")  # M0 §2 step 7: the "System job" that promotes
+SYSTEM_ACTORS = frozenset({SYSTEM_RESCAN, SYSTEM_PROMOTE})
 _SYSTEM_ACTIONS = MappingProxyType(
     {
         SYSTEM_RESCAN: frozenset(
@@ -191,7 +194,15 @@ _SYSTEM_ACTIONS = MappingProxyType(
                 AuditAction.DELIVERY_INTEGRITY_FAILED,
                 AuditAction.DELIVERY_REQUEST_REJECTED,  # a rescan that was asked for and refused
             }
-        )
+        ),
+        SYSTEM_PROMOTE: frozenset(
+            {
+                AuditAction.DELIVERY_PROMOTION_STARTED,
+                AuditAction.DELIVERY_PROMOTED,
+                AuditAction.DELIVERY_INTEGRITY_FAILED,
+                AuditAction.DELIVERY_REQUEST_REJECTED,  # a promotion that was asked for and refused
+            }
+        ),
     }
 )
 
