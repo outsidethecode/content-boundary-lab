@@ -58,6 +58,7 @@ def event(lab, *, action, outcome, reason=None, actor="coordinator-1", object_id
         "object_type": "engagement" if object_id else None,
         "object_id": object_id,
         "reason": reason,
+        "engine_kind": None,
     }
 
 

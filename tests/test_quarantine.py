@@ -375,3 +375,173 @@ def test_no_descriptor_is_left_open_by_any_path_through_the_module(root):
     with pytest.raises(FileExistsError):
         quarantine.publish(root, received(root, b"x").name, KEY)  # a refused placement closes what it opened
     assert open_descriptors() == before
+
+
+# --- reading a stored file back for sealing (M1I) --------------------------------------------------------------------
+#
+# One descriptor is opened (no-follow, regular file only, by the opaque key under a validated root) and every read goes
+# through it at an explicit offset, so no pass depends on where the last one stopped and the path is never reopened.
+
+
+def store_file(root, content: bytes) -> None:
+    (root / KEY).write_bytes(content)
+
+
+@pytest.mark.parametrize("content", [b"", b"x", bytes(range(256)) * 600, b"z" * 65536, b"z" * 65537])
+@pytest.mark.parametrize("size", [1, 7, 4096, 65536])
+def test_the_stored_file_is_read_whole_in_chunks_and_its_size_is_measured_from_the_descriptor(root, content, size):
+    store_file(root, content)
+    with quarantine.open_stored(root, KEY) as stored:
+        assert stored.size == len(content)
+        pieces = list(stored.chunks(size))
+        assert b"".join(pieces) == content and all(0 < len(piece) <= size for piece in pieces)
+
+
+def test_every_pass_starts_at_the_beginning_whatever_the_last_one_did(root):
+    content = bytes(range(256)) * 100
+    store_file(root, content)
+    with quarantine.open_stored(root, KEY) as stored:
+        partial = stored.chunks(100)
+        assert next(partial) == content[:100]  # an abandoned pass leaves nothing behind
+        assert b"".join(stored.chunks()) == content
+        assert stored.head(16) == content[:16]  # reading the head moves no position either
+        assert b"".join(stored.chunks()) == content
+        stream = stored.scan_stream()
+        assert stream.tell() == 0 and stream.read() == content and stream.tell() == len(content)
+        assert b"".join(stored.chunks()) == content and stored.scan_stream().tell() == 0
+
+
+def test_the_head_is_at_most_what_is_asked_for_and_at_most_the_file(root):
+    store_file(root, b"0123456789")
+    with quarantine.open_stored(root, KEY) as stored:
+        assert (stored.head(4), stored.head(10), stored.head(500), stored.head(0)) == (b"0123", b"0123456789", b"0123456789", b"")
+        for bad in (-1, 1.5, "4", None, True):
+            with pytest.raises((TypeError, ValueError)):
+                stored.head(bad)
+
+
+def test_a_scan_stream_reads_the_same_bytes_as_a_pass_and_closing_it_leaves_the_file_open(root):
+    content = b"stream me " * 5000
+    store_file(root, content)
+    with quarantine.open_stored(root, KEY) as stored:
+        stream = stored.scan_stream()
+        assert [stream.read(7), stream.read(3)] == [content[:7], content[7:10]]
+        stream.close()
+        assert b"".join(stored.chunks()) == content  # the descriptor belongs to the stored file, not to the stream
+        again = stored.scan_stream()
+        assert again.read(5) == content[:5]
+
+
+def test_a_closed_stored_file_refuses_every_read(root):
+    store_file(root, b"data")
+    with quarantine.open_stored(root, KEY) as stored:
+        pass
+    for call in (lambda: list(stored.chunks()), lambda: stored.head(1), stored.ensure_unchanged, stored.scan_stream):
+        with pytest.raises(ValueError, match="closed"):
+            call()
+
+
+@pytest.mark.parametrize("kind", ["missing", "a symlink to a file", "a dangling symlink", "a directory", "a named pipe"])
+def test_only_a_regular_file_is_ever_opened(tmp_path, root, kind):
+    if kind == "a symlink to a file":
+        (tmp_path / "secret.txt").write_bytes(b"outside the quarantine root")
+        (root / KEY).symlink_to(tmp_path / "secret.txt")
+    elif kind != "missing":
+        occupy(root / KEY, tmp_path, kind)
+    before = open_descriptors()
+    with pytest.raises(OSError):  # no-follow, regular only, and a pipe cannot hold the reader
+        quarantine.open_stored(root, KEY)
+    assert open_descriptors() == before
+    if kind == "a symlink to a file":
+        assert (tmp_path / "secret.txt").read_bytes() == b"outside the quarantine root"
+
+
+def test_the_root_must_be_absolute_and_not_a_symlink_and_the_key_must_be_server_made(tmp_path, root):
+    store_file(root, b"data")
+    (tmp_path / "link").symlink_to(root)
+    with pytest.raises(OSError):
+        quarantine.open_stored(tmp_path / "link", KEY)
+    with pytest.raises(ValueError, match="absolute"):
+        quarantine.open_stored(Path("relative"), KEY)
+    for name in HOSTILE_NAMES:
+        with pytest.raises(ValueError):
+            quarantine.open_stored(root, name)
+
+
+def test_the_opened_file_is_the_file_that_is_read_even_if_the_name_is_replaced_afterwards(root):
+    store_file(root, b"the original bytes")
+    with quarantine.open_stored(root, KEY) as stored:
+        (root / KEY).unlink()
+        (root / KEY).write_bytes(b"a different file under the same name")
+        assert stored.scan_stream().read() == b"the original bytes"  # never reopened by path
+        assert stored.head(8) == b"the orig"
+        with pytest.raises(quarantine.QuarantineChanged):  # but the name no longer leads to what was inspected,
+            stored.ensure_unchanged()
+        with pytest.raises(quarantine.QuarantineChanged):  # so a pass that hashes it does not end as a result
+            list(stored.chunks())
+
+
+def test_an_unchanged_file_passes_the_check_however_often_it_is_read(root):
+    store_file(root, b"unchanged " * 1000)
+    with quarantine.open_stored(root, KEY) as stored:
+        list(stored.chunks())
+        stored.head(8)
+        stored.scan_stream().read()
+        stored.ensure_unchanged()
+        stored.ensure_unchanged()
+
+
+def append(root, data=b"more"):
+    with (root / KEY).open("ab") as handle:
+        handle.write(data)
+
+
+CHANGES = {
+    "bytes appended": lambda root: append(root),
+    "the file truncated": lambda root: (root / KEY).write_bytes(b"short"),
+    "the same size, other bytes": lambda root: (root / KEY).write_bytes(b"Y" * 3000),
+    "only the modification time": lambda root: os.utime(root / KEY, (1, 1)),
+}
+
+
+@pytest.mark.parametrize("change", CHANGES)
+def test_a_change_after_opening_is_detected_by_the_check(root, change):
+    store_file(root, b"X" * 3000)
+    with quarantine.open_stored(root, KEY) as stored:
+        CHANGES[change](root)
+        with pytest.raises(quarantine.QuarantineChanged):
+            stored.ensure_unchanged()
+
+
+@pytest.mark.parametrize("change", ["bytes appended", "the file truncated", "the same size, other bytes"])
+def test_a_change_while_a_pass_is_running_fails_that_pass_at_its_end(root, change):
+    store_file(root, b"X" * 3000)
+    with quarantine.open_stored(root, KEY) as stored:
+        passes = stored.chunks(1000)
+        next(passes)
+        CHANGES[change](root)
+        with pytest.raises(quarantine.QuarantineChanged):
+            list(passes)
+
+
+def test_a_pass_that_reads_fewer_or_more_bytes_than_the_measured_size_is_an_error(root):
+    store_file(root, b"X" * 3000)
+    with quarantine.open_stored(root, KEY) as stored:
+        (root / KEY).write_bytes(b"X" * 2000)  # shorter than the size measured at open
+        with pytest.raises(quarantine.QuarantineChanged):
+            list(stored.chunks())
+
+
+def test_no_descriptor_is_left_open_by_reading_or_by_failing_to_read(root):
+    store_file(root, b"data" * 1000)
+    before = open_descriptors()
+    with quarantine.open_stored(root, KEY) as stored:
+        list(stored.chunks())
+        stored.head(4)
+        stream = stored.scan_stream()
+        stream.read()
+        stream.close()
+        append(root)
+        with pytest.raises(quarantine.QuarantineChanged):
+            stored.ensure_unchanged()
+    assert open_descriptors() == before

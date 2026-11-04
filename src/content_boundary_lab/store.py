@@ -135,8 +135,22 @@ _SCHEMA: tuple[str, ...] = (
         uploaded_at INTEGER,
         received_size INTEGER CHECK (received_size >= 0),
         received_sha256 TEXT CHECK (length(received_sha256) = 64 AND received_sha256 NOT GLOB '*[^0-9a-f]*'),
+        sealed_size INTEGER CHECK (sealed_size >= 0),
+        sealed_sha256 TEXT CHECK (length(sealed_sha256) = 64 AND sealed_sha256 NOT GLOB '*[^0-9a-f]*'),
+        receipt_matched INTEGER CHECK (receipt_matched IN (0, 1)),
+        state_reason TEXT,
+        verdict_id TEXT REFERENCES verdicts (id) ON DELETE RESTRICT,
         CHECK ((state = 'INITIATED') = (received_sha256 IS NULL)),
-        CHECK ((received_sha256 IS NULL) = (received_size IS NULL) AND (received_sha256 IS NULL) = (uploaded_at IS NULL))
+        CHECK ((received_sha256 IS NULL) = (received_size IS NULL) AND (received_sha256 IS NULL) = (uploaded_at IS NULL)),
+        CHECK ((sealed_sha256 IS NULL) = (sealed_size IS NULL) AND (sealed_sha256 IS NULL) = (receipt_matched IS NULL)),
+        CHECK (state NOT IN ('INITIATED', 'UPLOADED') OR sealed_sha256 IS NULL),
+        CHECK (state IN ('INITIATED', 'UPLOADED', 'SEALING') OR sealed_sha256 IS NOT NULL),
+        CHECK (
+            (state = 'REJECTED' AND state_reason IS NOT NULL AND state_reason IN ('checksum_mismatch', 'unsupported_type', 'detection'))
+            OR (state = 'SCAN_FAILED' AND state_reason IS NOT NULL AND state_reason IN ('unavailable', 'timeout', 'bad_response'))
+            OR (state NOT IN ('REJECTED', 'SCAN_FAILED') AND state_reason IS NULL)
+        ),
+        CHECK (state != 'SCAN_PASSED' OR verdict_id IS NOT NULL)
     ) STRICT""",
     # A delivery is created in INITIATED and never deleted, replaced or renamed (INSERT OR REPLACE would delete a row
     # without firing the delete trigger, so a BEFORE INSERT guard rejects any insert that collides on id, rowid or
@@ -171,6 +185,47 @@ _SCHEMA: tuple[str, ...] = (
         OR NEW.uploaded_at IS NOT OLD.uploaded_at
     )
     BEGIN SELECT RAISE(ABORT, 'delivery receipt is final'); END""",
+    # M1I. The seal (what the server measured and hashed in quarantine at seal time: the authoritative digest H, the size
+    # and whether they agree with the intake receipt) is written once, with the move out of SEALING, and never changed. A
+    # delivery enters SCAN_PASSED only with a no_detection verdict that is bound to its own sealed digest, so no code path,
+    # whatever it believes, can write a passing scan without a valid verdict row (Addendum §5.2).
+    """CREATE TRIGGER deliveries_seal_is_final BEFORE UPDATE ON deliveries
+    WHEN OLD.sealed_sha256 IS NOT NULL AND (
+        NEW.sealed_sha256 IS NOT OLD.sealed_sha256 OR NEW.sealed_size IS NOT OLD.sealed_size
+        OR NEW.receipt_matched IS NOT OLD.receipt_matched
+    )
+    BEGIN SELECT RAISE(ABORT, 'delivery seal is final'); END""",
+    """CREATE TRIGGER deliveries_pass_needs_a_matching_verdict BEFORE UPDATE ON deliveries
+    WHEN NEW.state = 'SCAN_PASSED' AND OLD.state != 'SCAN_PASSED' AND NOT EXISTS (
+        SELECT 1 FROM verdicts AS v
+        WHERE v.id = NEW.verdict_id AND v.sha256 = NEW.sealed_sha256 AND v.verdict = 'no_detection'
+    )
+    BEGIN SELECT RAISE(ABORT, 'a delivery passes the scan only with a no_detection verdict bound to its sealed digest'); END""",
+    # A scanner verdict is bound to the digest of the bytes it was made for, by the engine and policy that made it, and is
+    # kept for audit for good: it is never changed, deleted or replaced. Whether one may be reused is decided when it is
+    # read (same digest, engine, version, kind and policy, a no_detection verdict, not expired), never by editing it.
+    """CREATE TABLE verdicts (
+        id TEXT NOT NULL PRIMARY KEY CHECK (length(id) = 32 AND id NOT GLOB '*[^0-9a-f]*'),
+        sha256 TEXT NOT NULL CHECK (length(sha256) = 64 AND sha256 NOT GLOB '*[^0-9a-f]*'),
+        engine_id TEXT NOT NULL CHECK (length(engine_id) BETWEEN 1 AND 100),
+        engine_version TEXT NOT NULL CHECK (length(engine_version) BETWEEN 1 AND 100),
+        engine_kind TEXT NOT NULL CHECK (engine_kind IN ('synthetic')),
+        policy_fingerprint TEXT NOT NULL CHECK (length(policy_fingerprint) BETWEEN 1 AND 128),
+        verdict TEXT NOT NULL CHECK (verdict IN ('no_detection', 'detection')),
+        scanned_sha256 TEXT NOT NULL CHECK (scanned_sha256 = sha256),
+        scanned_at INTEGER NOT NULL CHECK (scanned_at >= 0),
+        valid_until INTEGER NOT NULL,
+        delivery_id TEXT REFERENCES deliveries (id) ON DELETE RESTRICT,
+        CHECK (valid_until > scanned_at)
+    ) STRICT""",
+    "CREATE INDEX verdicts_by_content ON verdicts (sha256, engine_id, engine_version, policy_fingerprint)",
+    """CREATE TRIGGER verdicts_are_immutable BEFORE UPDATE ON verdicts
+    BEGIN SELECT RAISE(ABORT, 'verdicts are immutable'); END""",
+    """CREATE TRIGGER verdicts_are_kept BEFORE DELETE ON verdicts
+    BEGIN SELECT RAISE(ABORT, 'verdicts are kept'); END""",
+    """CREATE TRIGGER verdicts_are_not_replaced BEFORE INSERT ON verdicts
+    WHEN EXISTS (SELECT 1 FROM verdicts WHERE id = NEW.id OR rowid = NEW.rowid)
+    BEGIN SELECT RAISE(ABORT, 'verdicts are not replaced'); END""",
     # No foreign keys here: an event about a missing object must still be recordable.
     """CREATE TABLE audit_events (
         seq INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -183,6 +238,7 @@ _SCHEMA: tuple[str, ...] = (
         object_type TEXT,
         object_id TEXT CHECK (length(object_id) <= 128),
         reason TEXT,
+        engine_kind TEXT CHECK (engine_kind IN ('synthetic')),
         CHECK ((actor_issuer IS NULL) = (actor_subject IS NULL))
     ) STRICT""",
     # Audit rows can be added, never changed. INSERT OR REPLACE would delete a row without firing the delete
@@ -527,6 +583,47 @@ def add_delivery(
         ),
     )
     return NewDelivery(delivery_id, storage_key)
+
+
+def add_verdict(
+    conn: sqlite3.Connection,
+    *,
+    sha256: str,
+    engine_id: str,
+    engine_version: str,
+    engine_kind: str,
+    policy_fingerprint: str,
+    verdict: str,
+    scanned_sha256: str,
+    scanned_at: int,
+    valid_until: int,
+    delivery_id: str | None = None,
+) -> str:
+    """Record a scanner's verdict, bound to the digest `sha256` of the bytes it was made for, and return its id.
+
+    The id is generated here. `scanned_sha256` is what the scanner said it read: the schema accepts the row only if it is
+    the same digest, so a verdict row cannot exist for bytes the scanner did not report on. Times are microseconds; the
+    verdict is valid until `valid_until`. The row can never be changed or removed afterwards (triggers).
+    """
+    verdict_id = _new_id()
+    conn.execute(
+        "INSERT INTO verdicts (id, sha256, engine_id, engine_version, engine_kind, policy_fingerprint, verdict, "
+        "scanned_sha256, scanned_at, valid_until, delivery_id) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        (
+            verdict_id,
+            sha256,
+            engine_id,
+            engine_version,
+            engine_kind,
+            policy_fingerprint,
+            verdict,
+            scanned_sha256,
+            scanned_at,
+            valid_until,
+            delivery_id,
+        ),
+    )
+    return verdict_id
 
 
 def add_asset(conn: sqlite3.Connection, clock: Clock, production_id: str, display_name: str) -> str:

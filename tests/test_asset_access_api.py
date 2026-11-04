@@ -65,6 +65,7 @@ def read_event(lab, asset_id, *, subject="vendor-1", production=None, at=T0, seq
         "object_type": "asset",
         "object_id": asset_id,
         "reason": None,
+        "engine_kind": None,
     }
 
 
@@ -80,6 +81,7 @@ def miss_event(lab, reason, object_id=None, *, subject="vendor-1", production=No
         "object_type": "asset" if object_id else None,
         "object_id": object_id,
         "reason": reason,
+        "engine_kind": None,
     }
 
 

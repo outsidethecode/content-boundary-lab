@@ -48,6 +48,7 @@ from support.http_lab import (  # the harness (and its fixtures) moved to tests/
 from content_boundary_lab import audit, authz, engagements, identity, management, request_flow, store
 from content_boundary_lab.app import Dependencies, create_app
 from content_boundary_lab.clock import to_micros
+from content_boundary_lab.scanner import LabSyntheticMarkerScanner
 
 
 # ----------------------------------------------------------------------------------------------- the fixtures
@@ -102,6 +103,7 @@ def test_a_successful_view_is_recorded_once_against_the_authorised_engagement(la
             "object_type": "engagement",
             "object_id": lab.engagements["vendor"],
             "reason": None,
+            "engine_kind": None,
         }
     ]
 
@@ -186,6 +188,7 @@ def test_bad_credentials_get_a_generic_401_and_one_anonymous_denial(lab, case):
             "object_type": None,
             "object_id": None,
             "reason": "invalid_credentials",
+            "engine_kind": None,
         }
     ]
 
@@ -594,6 +597,7 @@ def test_a_database_that_cannot_be_opened_is_a_generic_500_without_the_path(tmp_
             asset_root=tmp_path / "assets",
             quarantine_root=tmp_path / "quarantine",
             max_upload_bytes=1024,
+            scanner=LabSyntheticMarkerScanner(),
         )
     )
     with TestClient(app) as client, caplog.at_level(logging.ERROR, logger=LOGGER):
@@ -728,6 +732,7 @@ def test_a_500_from_an_unopenable_database_is_not_to_be_stored(tmp_path):
             asset_root=tmp_path / "assets",
             quarantine_root=tmp_path / "quarantine",
             max_upload_bytes=1024,
+            scanner=LabSyntheticMarkerScanner(),
         )
     )
     with TestClient(app) as client:
@@ -922,6 +927,7 @@ def test_the_application_registers_only_the_approved_routes_and_serves_no_docume
         "/productions/{production_id:path}/assets/{asset_id:path}",
         "/productions/{production_id:path}/deliveries",
         "/productions/{production_id:path}/deliveries/{delivery_id:path}/content",
+        "/productions/{production_id:path}/deliveries/{delivery_id:path}/seal",
     }
     for path in ("/docs", "/redoc", "/openapi.json", "/"):
         assert lab.client.get(path).status_code == 404

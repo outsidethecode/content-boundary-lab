@@ -79,8 +79,18 @@ def world(tmp_path):
         alpha, bravo = store.add_production(conn, clock, "ALPHA"), store.add_production(conn, clock, "BRAVO")
         vendor = store.add_subject(conn, clock, ISSUER, "vendor-1", "Vendor")
         other = store.add_subject(conn, clock, ISSUER, "vendor-2", "Other")
-    yield SimpleNamespace(conn=conn, clock=clock, alpha=alpha, bravo=bravo, vendor=vendor, other=other, path=path)
+        verdict = add_verdict(conn)  # a no_detection verdict for SHA, which every delivery below is sealed with
+    yield SimpleNamespace(conn=conn, clock=clock, alpha=alpha, bravo=bravo, vendor=vendor, other=other, path=path, verdict=verdict)
     conn.close()
+
+
+def add_verdict(conn, **overrides):
+    values = {
+        "sha256": SHA, "engine_id": "lab-synthetic-marker", "engine_version": "1", "engine_kind": "synthetic",
+        "policy_fingerprint": "f" * 64, "verdict": "no_detection", "scanned_sha256": SHA, "scanned_at": 10, "valid_until": 20,
+        **overrides,
+    }  # fmt: skip
+    return store.add_verdict(conn, **values)
 
 
 def new_delivery(world, **overrides):
@@ -100,15 +110,27 @@ def row(world, delivery_id):
     return dict(world.conn.execute("SELECT * FROM deliveries WHERE id = ?", (delivery_id,)).fetchone())
 
 
+SEALED_STATES = ("REJECTED", "SCAN_FAILED", "SCAN_PASSED", "ACCEPTED", "PROMOTING", "PROMOTED", "INTEGRITY_FAILED")
+WITH_VERDICT = ("SCAN_PASSED", "ACCEPTED", "PROMOTING", "PROMOTED")
+REASONS = {"REJECTED": "checksum_mismatch", "SCAN_FAILED": "timeout"}
+
+
 def advance(world, delivery_id, state):
-    """Set the state the way a milestone would: the receipt is written together with the first step out of INITIATED."""
+    """Set the state the way a milestone would: the receipt with the first step out of INITIATED, the seal and the
+    reason and the verdict with the step into a state that needs them. Only the lifecycle trigger can refuse these."""
     if state == "INITIATED":
         world.conn.execute("UPDATE deliveries SET state = 'INITIATED' WHERE id = ?", (delivery_id,))
         return
+    sealed = state in SEALED_STATES
     world.conn.execute(
-        "UPDATE deliveries SET state = ?, received_size = 7, received_sha256 = ?, uploaded_at = 5 WHERE id = ?",
-        (state, SHA, delivery_id),
-    )
+        "UPDATE deliveries SET state = ?, received_size = 7, received_sha256 = ?, uploaded_at = 5, "
+        "sealed_size = COALESCE(?, sealed_size), sealed_sha256 = COALESCE(?, sealed_sha256), "
+        "receipt_matched = COALESCE(?, receipt_matched), state_reason = ?, verdict_id = COALESCE(?, verdict_id) WHERE id = ?",
+        (
+            state, SHA, 7 if sealed else None, SHA if sealed else None, 1 if sealed else None,
+            REASONS.get(state), world.verdict if state in WITH_VERDICT else None, delivery_id,
+        ),
+    )  # fmt: skip
 
 
 def at(world, delivery_id, state):
@@ -357,3 +379,191 @@ def test_a_database_without_the_deliveries_table_is_refused_at_connection(world)
 
 def test_the_schema_version_is_unchanged_because_the_initial_schema_is_still_the_only_one():
     assert store.SCHEMA_VERSION == 1
+
+
+# --- M1I: the seal, the reason and the verdict on a delivery, and the verdicts table ----------------------------------
+#
+# These extend the one initial schema (no migration). The lifecycle names and arrows are untouched; what is new is that
+# the database refuses a state that needs a seal, a reason or a verdict when it has none, and a SCAN_PASSED that is not
+# bound to a no_detection verdict for its own sealed digest.
+
+
+def sealing(world):
+    created = new_delivery(world)
+    at(world, created.id, "SEALING")
+    return created
+
+
+def test_a_new_delivery_has_no_seal_no_reason_and_no_verdict(world):
+    created = new_delivery(world)
+    stored = row(world, created.id)
+    assert all(stored[column] is None for column in ("sealed_size", "sealed_sha256", "receipt_matched", "state_reason", "verdict_id"))
+
+
+@pytest.mark.parametrize("state", ["INITIATED", "UPLOADED"])
+def test_nothing_is_sealed_before_sealing_begins(world, state):
+    created = new_delivery(world)
+    at(world, created.id, state)
+    with pytest.raises(sqlite3.IntegrityError):
+        world.conn.execute(
+            "UPDATE deliveries SET sealed_size = 7, sealed_sha256 = ?, receipt_matched = 1 WHERE id = ?", (SHA, created.id)
+        )
+
+
+@pytest.mark.parametrize("state", ["REJECTED", "SCAN_FAILED", "SCAN_PASSED", "INTEGRITY_FAILED"])
+def test_leaving_sealing_requires_the_sealed_digest_and_size(world, state):
+    created = sealing(world)
+    verdict = world.verdict if state == "SCAN_PASSED" else None
+    with pytest.raises(sqlite3.IntegrityError):
+        world.conn.execute(
+            "UPDATE deliveries SET state = ?, state_reason = ?, verdict_id = ? WHERE id = ?", (state, REASONS.get(state), verdict, created.id)
+        )
+    assert row(world, created.id)["state"] == "SEALING"
+
+
+@pytest.mark.parametrize(
+    "assignment",
+    [
+        "sealed_size = 7",
+        "sealed_sha256 = '%s'" % SHA,
+        "receipt_matched = 1",
+        "sealed_size = 7, sealed_sha256 = '%s'" % SHA,  # the diagnostic is part of the seal
+        "sealed_size = 7, sealed_sha256 = '%s', receipt_matched = 2" % SHA,
+        "sealed_size = 7, sealed_sha256 = '%s', receipt_matched = -1" % SHA,
+        "sealed_size = -1, sealed_sha256 = '%s', receipt_matched = 1" % SHA,
+        "sealed_size = 7, sealed_sha256 = '%s', receipt_matched = 1" % SHA.upper(),
+        "sealed_size = 7, sealed_sha256 = 'abc', receipt_matched = 1",
+    ],
+)
+def test_a_seal_is_the_size_the_digest_and_the_diagnostic_together_and_well_formed(world, assignment):
+    created = sealing(world)
+    with pytest.raises(sqlite3.IntegrityError):
+        world.conn.execute(f"UPDATE deliveries SET state = 'REJECTED', state_reason = 'checksum_mismatch', {assignment} WHERE id = ?", (created.id,))
+    assert row(world, created.id)["state"] == "SEALING"
+
+
+def test_the_seal_is_written_once_and_never_changed(world):
+    created = new_delivery(world)
+    at(world, created.id, "REJECTED")
+    before = row(world, created.id)
+    for assignment, value in (("sealed_size", 8), ("sealed_sha256", OTHER_SHA), ("receipt_matched", 0)):
+        with pytest.raises(sqlite3.IntegrityError, match="seal"):
+            world.conn.execute(f"UPDATE deliveries SET {assignment} = ? WHERE id = ?", (value, created.id))
+        with pytest.raises(sqlite3.IntegrityError):
+            world.conn.execute(f"UPDATE deliveries SET {assignment} = NULL WHERE id = ?", (created.id,))
+    world.conn.execute("UPDATE deliveries SET sealed_size = 7, sealed_sha256 = ?, receipt_matched = 1 WHERE id = ?", (SHA, created.id))
+    assert row(world, created.id) == before  # writing the same values is not a change
+
+
+@pytest.mark.parametrize(
+    ("state", "reason"),
+    [("REJECTED", "checksum_mismatch"), ("REJECTED", "unsupported_type"), ("REJECTED", "detection"),
+     ("SCAN_FAILED", "unavailable"), ("SCAN_FAILED", "timeout"), ("SCAN_FAILED", "bad_response")],
+)  # fmt: skip
+def test_the_approved_reasons_are_accepted_for_their_own_state(world, state, reason):
+    created = sealing(world)
+    world.conn.execute(
+        "UPDATE deliveries SET state = ?, state_reason = ?, sealed_size = 7, sealed_sha256 = ?, receipt_matched = 1 WHERE id = ?",
+        (state, reason, SHA, created.id),
+    )
+    assert row(world, created.id)["state_reason"] == reason
+
+
+@pytest.mark.parametrize(
+    ("state", "reason"),
+    [("REJECTED", "timeout"), ("REJECTED", "bad_response"), ("SCAN_FAILED", "detection"), ("SCAN_FAILED", "checksum_mismatch"),
+     ("REJECTED", None), ("SCAN_FAILED", None), ("REJECTED", "clean"), ("REJECTED", ""), ("SCAN_FAILED", "TIMEOUT"),
+     ("REJECTED", "checksum_mismatch "), ("REJECTED", "no_detection")],
+)  # fmt: skip
+def test_a_rejection_or_a_failure_needs_the_reason_that_belongs_to_it(world, state, reason):
+    created = sealing(world)
+    with pytest.raises(sqlite3.IntegrityError):
+        world.conn.execute(
+            "UPDATE deliveries SET state = ?, state_reason = ?, sealed_size = 7, sealed_sha256 = ?, receipt_matched = 1 WHERE id = ?",
+            (state, reason, SHA, created.id),
+        )
+
+
+@pytest.mark.parametrize("state", ["SEALING", "SCAN_PASSED"])
+def test_no_other_state_carries_a_reason(world, state):
+    created = new_delivery(world)
+    at(world, created.id, state)
+    with pytest.raises(sqlite3.IntegrityError):
+        world.conn.execute("UPDATE deliveries SET state_reason = 'timeout' WHERE id = ?", (created.id,))
+
+
+def test_scan_passed_needs_a_no_detection_verdict_bound_to_the_sealed_digest(world):
+    created = sealing(world)
+    enter = "UPDATE deliveries SET state = 'SCAN_PASSED', sealed_size = 7, sealed_sha256 = ?, receipt_matched = 1, verdict_id = ? WHERE id = ?"
+    elsewhere = add_verdict(world.conn, sha256=OTHER_SHA, scanned_sha256=OTHER_SHA)
+    detection = add_verdict(world.conn, verdict="detection")
+    for verdict_id, why in ((None, "no verdict"), ("0" * 32, "no such verdict"), (elsewhere, "a verdict for other bytes"), (detection, "a detection")):
+        with pytest.raises(sqlite3.IntegrityError):
+            world.conn.execute(enter, (SHA, verdict_id, created.id))
+        assert row(world, created.id)["state"] == "SEALING", why
+    world.conn.execute(enter, (SHA, world.verdict, created.id))
+    assert row(world, created.id)["state"] == "SCAN_PASSED"
+
+
+def test_a_detection_may_be_recorded_against_its_own_verdict_and_the_digest_of_the_bytes(world):
+    created = sealing(world)
+    detection = add_verdict(world.conn, verdict="detection")
+    world.conn.execute(
+        "UPDATE deliveries SET state = 'REJECTED', state_reason = 'detection', sealed_size = 7, sealed_sha256 = ?, receipt_matched = 1, verdict_id = ? WHERE id = ?",
+        (SHA, detection, created.id),
+    )
+    assert row(world, created.id)["verdict_id"] == detection
+
+
+VERDICT_HOSTILE = {
+    "a digest in capitals": {"sha256": "A" * 64, "scanned_sha256": "A" * 64},
+    "a short digest": {"sha256": "a" * 63, "scanned_sha256": "a" * 63},
+    "a digest that is not hexadecimal": {"sha256": "g" * 64, "scanned_sha256": "g" * 64},
+    "a scanner digest that is not the digest it is bound to": {"scanned_sha256": OTHER_SHA},
+    "no engine id": {"engine_id": ""},
+    "no engine version": {"engine_version": ""},
+    "no policy fingerprint": {"policy_fingerprint": ""},
+    "an engine kind outside the vocabulary": {"engine_kind": "real"},
+    "an engine kind that claims to be clean": {"engine_kind": "clean"},
+    "a verdict called clean": {"verdict": "clean"},
+    "a verdict called safe": {"verdict": "safe"},
+    "a verdict in capitals": {"verdict": "NO_DETECTION"},
+    "a verdict that expires when it begins": {"scanned_at": 20, "valid_until": 20},
+    "a verdict that expired before it began": {"scanned_at": 20, "valid_until": 10},
+    "a negative scan time": {"scanned_at": -1},
+    "an origin delivery that does not exist": {"delivery_id": "9" * 32},
+}
+
+
+@pytest.mark.parametrize("changes", VERDICT_HOSTILE.values(), ids=list(VERDICT_HOSTILE))
+def test_a_verdict_must_be_bound_to_its_digest_and_labelled_with_the_engine_that_made_it(world, changes):
+    before = world.conn.execute("SELECT COUNT(*) FROM verdicts").fetchone()[0]
+    with pytest.raises(sqlite3.IntegrityError):
+        add_verdict(world.conn, **changes)
+    assert world.conn.execute("SELECT COUNT(*) FROM verdicts").fetchone()[0] == before
+
+
+def test_a_verdict_keeps_exactly_what_it_was_given_and_has_a_server_made_id(world):
+    verdict_id = add_verdict(world.conn, sha256=OTHER_SHA, scanned_sha256=OTHER_SHA, engine_version="2", scanned_at=100, valid_until=300)
+    stored = dict(world.conn.execute("SELECT * FROM verdicts WHERE id = ?", (verdict_id,)).fetchone())
+    assert HEX32.fullmatch(verdict_id) and stored["id"] == verdict_id
+    assert (stored["sha256"], stored["engine_version"], stored["engine_kind"], stored["scanned_at"], stored["valid_until"]) == (OTHER_SHA, "2", "synthetic", 100, 300)
+    assert len({add_verdict(world.conn) for _ in range(20)}) == 20
+
+
+def test_a_verdict_can_never_be_changed_deleted_or_replaced(world):
+    before = dict(world.conn.execute("SELECT * FROM verdicts WHERE id = ?", (world.verdict,)).fetchone())
+    for column, value in (("valid_until", 10**15), ("verdict", "detection"), ("engine_version", "9"), ("sha256", OTHER_SHA), ("id", "e" * 32)):
+        with pytest.raises(sqlite3.IntegrityError, match="verdict"):
+            world.conn.execute(f"UPDATE verdicts SET {column} = ? WHERE id = ?", (value, world.verdict))
+    with pytest.raises(sqlite3.IntegrityError, match="verdict"):
+        world.conn.execute("UPDATE verdicts SET valid_until = valid_until WHERE id = ?", (world.verdict,))  # not even a no-op
+    with pytest.raises(sqlite3.IntegrityError, match="verdict"):
+        world.conn.execute("DELETE FROM verdicts")
+    with pytest.raises(sqlite3.IntegrityError):
+        world.conn.execute(
+            "INSERT OR REPLACE INTO verdicts (id, sha256, engine_id, engine_version, engine_kind, policy_fingerprint, verdict, "
+            "scanned_sha256, scanned_at, valid_until) VALUES (?, ?, 'x', 'x', 'synthetic', 'x', 'detection', ?, 1, 2)",
+            (world.verdict, SHA, SHA),
+        )
+    assert dict(world.conn.execute("SELECT * FROM verdicts WHERE id = ?", (world.verdict,)).fetchone()) == before

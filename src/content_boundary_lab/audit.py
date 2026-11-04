@@ -36,6 +36,11 @@ class AuditAction(StrEnum):
     DELIVERY_UPLOAD_STARTED = "delivery.upload_started"  # committed admission to begin receiving; not that any byte arrived
     DELIVERY_UPLOADED = "delivery.uploaded"  # the bytes are in quarantine and the move to UPLOADED committed with this event
     DELIVERY_UPLOAD_FAILED = "delivery.upload_failed"  # a started upload that did not end in UPLOADED (decided or abandoned)
+    DELIVERY_SEAL_STARTED = "delivery.seal_started"  # committed move to SEALING; the server will now inspect the bytes
+    DELIVERY_SCAN_PASSED = "delivery.scan_passed"  # SCAN_PASSED on a verdict the scanner just made: no_detection, nothing more
+    DELIVERY_VERDICT_REUSED = "delivery.verdict_reused"  # SCAN_PASSED on a cached verdict for the same digest and scanner
+    DELIVERY_REJECTED = "delivery.rejected"  # REJECTED: a mismatch, an unsupported type or a detection (the reason says which)
+    DELIVERY_SCAN_FAILED = "delivery.scan_failed"  # SCAN_FAILED: the scanner could not give a verdict (the reason says why)
 
 
 class AuditReason(StrEnum):
@@ -53,6 +58,12 @@ class AuditReason(StrEnum):
     PAYLOAD_TOO_LARGE = "payload_too_large"  # a body over the limit; its size and content are not recorded
     STATE_CONFLICT = "state_conflict"  # the delivery was not (or was no longer) in the state the request needs
     UPLOAD_INTERRUPTED = "upload_interrupted"  # the client went away before the end of its body
+    CHECKSUM_MISMATCH = "checksum_mismatch"  # the measured size or the server's SHA-256 is not what the vendor declared
+    UNSUPPORTED_TYPE = "unsupported_type"  # the content's signature is not on the allowlist
+    DETECTION = "detection"  # the scanner reported a detection for the bytes
+    SCANNER_UNAVAILABLE = "scanner_unavailable"  # the scanner could not be used
+    SCANNER_TIMEOUT = "scanner_timeout"  # the scanner did not answer in time
+    SCANNER_BAD_RESPONSE = "scanner_bad_response"  # the scanner's reply was malformed or described other bytes
 
 
 class ObjectType(StrEnum):
@@ -71,6 +82,30 @@ class Outcome(StrEnum):
     ALLOWED = "allowed"
     DENIED = "denied"
     RECORDED = "recorded"
+
+
+class EngineKind(StrEnum):
+    """The kind of scanner engine an event is about (M0 Addendum §5.3). Closed, and the same set the scanner contract and
+    the audit_events CHECK constraint accept: the shipped scanner is `synthetic`. A real engine would be a reviewed addition."""
+
+    SYNTHETIC = "synthetic"
+
+
+# engine.kind appears in every verdict-bearing audit event (Addendum §5.3). An event is verdict-bearing if it is about a
+# scanner's verdict, or about a scan that could not give one (then the kind is the configured scanner's). It is required
+# on those events and refused on every other, so the column is NULL everywhere else and is never free text.
+_KIND_REQUIRED_ACTIONS = frozenset(
+    {AuditAction.DELIVERY_SCAN_PASSED, AuditAction.DELIVERY_VERDICT_REUSED, AuditAction.DELIVERY_SCAN_FAILED}
+)
+_KIND_REQUIRED_BY_REASON = {AuditAction.DELIVERY_REJECTED: frozenset({AuditReason.DETECTION})}
+
+
+def _check_engine_kind(action: AuditAction, reason: AuditReason | None, engine_kind: EngineKind | None) -> None:
+    required = action in _KIND_REQUIRED_ACTIONS or reason in _KIND_REQUIRED_BY_REASON.get(action, ())
+    if required and engine_kind is None:
+        raise ValueError("an event about a scanner verdict needs its engine_kind")
+    if not required and engine_kind is not None:
+        raise ValueError("engine_kind is for events about a scanner verdict only")
 
 
 def _check_text(name: str, value: object, limit: int) -> None:
@@ -150,11 +185,15 @@ def record_event(
     object_type: ObjectType | None = None,
     object_id: str | None = None,
     reason: AuditReason | None = None,
+    engine_kind: EngineKind | None = None,
 ) -> int:
     """Append one audit event inside the caller's open transaction and return its sequence number.
 
     actor=None records an unauthenticated event. Invalid input is rejected before any SQL runs. If the insert itself
     fails, the error propagates and the caller's transaction fails with it: there is no best-effort fallback.
+
+    engine_kind is required on the events that are about a scanner verdict (a scan that passed, a verdict reused, a scan
+    that could not give a verdict, a detection) and refused on every other event; see _check_engine_kind.
 
     production_id and an object_id for a production, engagement or asset are 32 lowercase hexadecimal characters, as
     the store generates them; a subject's object_id is a canonical positive decimal integer; object_id needs an
@@ -166,13 +205,15 @@ def record_event(
     _require_type("actor", actor, Actor, optional=True)
     _require_type("object_type", object_type, ObjectType, optional=True)
     _require_type("reason", reason, AuditReason, optional=True)
+    _require_type("engine_kind", engine_kind, EngineKind, optional=True)
     _check_production_id(production_id)
     _check_object_id(object_type, object_id)
+    _check_engine_kind(action, reason, engine_kind)
     if not conn.in_transaction:
         raise StoreError("an audit event must be recorded inside the caller's transaction")
     cursor = conn.execute(
         "INSERT INTO audit_events (at, actor_issuer, actor_subject, action, outcome, production_id, object_type, "
-        "object_id, reason) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        "object_id, reason, engine_kind) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
         (
             to_micros(clock.now()),
             actor.issuer if actor else None,
@@ -183,6 +224,7 @@ def record_event(
             object_type.value if object_type else None,
             object_id,
             reason.value if reason else None,
+            engine_kind.value if engine_kind else None,
         ),
     )
     return cursor.lastrowid

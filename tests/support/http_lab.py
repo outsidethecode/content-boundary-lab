@@ -26,6 +26,7 @@ from support import token_issuer as tokens
 from content_boundary_lab import audit, authz, identity, store
 from content_boundary_lab.app import Dependencies, create_app
 from content_boundary_lab.clock import to_micros
+from content_boundary_lab.scanner import MARKER, LabSyntheticMarkerScanner
 
 UTC = timezone.utc
 T0 = datetime(2026, 11, 3, 12, tzinfo=UTC)  # the instant the default test token becomes valid (tokens.NOW)
@@ -67,6 +68,36 @@ STATE_ROUTES = {
 
 def sha256_hex(data: bytes) -> str:
     return hashlib.sha256(data).hexdigest()
+
+
+SEEDED_DIGEST = "d" * 64  # the sealed digest of every delivery that seed_delivery moves past SEALING
+PNG_SIGNATURE = b"\x89PNG\r\n\x1a\n"
+CLEAN_FILE = PNG_SIGNATURE + b"synthetic image payload with nothing the stub detects\n" * 20  # an allowed signature
+MARKER_FILE = PNG_SIGNATURE + b"synthetic image payload\n" + MARKER + b"\nmore payload\n" * 5  # allowed, and detected
+ZIP_FILE = b"PK\x03\x04" + b"an archive is not an allowed signature\n" * 10
+
+
+def advance_row(conn, delivery_id: str, state: str, now: int) -> None:
+    """Move a delivery one valid step, writing what the schema requires of the state it enters (receipt, seal, reason, verdict)."""
+    sealed = state not in ("INITIATED", "UPLOADED", "SEALING")
+    verdict_id = None
+    if state in ("SCAN_PASSED", "ACCEPTED", "PROMOTING", "PROMOTED"):
+        row = conn.execute("SELECT id FROM verdicts WHERE sha256 = ? LIMIT 1", (SEEDED_DIGEST,)).fetchone()
+        engine = LabSyntheticMarkerScanner().engine
+        verdict_id = row[0] if row else store.add_verdict(
+            conn, sha256=SEEDED_DIGEST, engine_id=engine.id, engine_version=engine.version, engine_kind=engine.kind,
+            policy_fingerprint=engine.policy_fingerprint, verdict="no_detection", scanned_sha256=SEEDED_DIGEST,
+            scanned_at=now, valid_until=now + 10**12,
+        )  # fmt: skip
+    conn.execute(
+        "UPDATE deliveries SET state = ?, received_size = 7, received_sha256 = ?, uploaded_at = ?, "
+        "sealed_size = COALESCE(?, sealed_size), sealed_sha256 = COALESCE(?, sealed_sha256), "
+        "receipt_matched = COALESCE(?, receipt_matched), state_reason = ?, verdict_id = COALESCE(?, verdict_id) WHERE id = ?",
+        (
+            state, SEEDED_DIGEST, now, 7 if sealed else None, SEEDED_DIGEST if sealed else None, 1 if sealed else None,
+            {"REJECTED": "checksum_mismatch", "SCAN_FAILED": "timeout"}.get(state), verdict_id, delivery_id,
+        ),
+    )  # fmt: skip
 
 
 OCCUPANTS = ["a regular file", "a dangling symlink", "a symlink to a file outside", "a directory", "a named pipe"]
@@ -161,7 +192,8 @@ class Background:
 class Lab:
     """One application, its database and its trusted key, with a small cast of subjects and engagements."""
 
-    def __init__(self, directory: Path, name: str = "lab") -> None:
+    def __init__(self, directory: Path, name: str = "lab", scanner=None) -> None:
+        self.scanner = scanner or LabSyntheticMarkerScanner()
         self.path = directory / f"{name}.sqlite3"
         self.asset_root = directory / f"{name}-trusted"  # the trusted asset root: one file per asset, named by its id
         self.quarantine_root = directory / f"{name}-quarantine"  # configured as the ingest root; nothing serves from it
@@ -182,6 +214,7 @@ class Lab:
                 asset_root=self.asset_root,
                 quarantine_root=self.quarantine_root,
                 max_upload_bytes=UPLOAD_LIMIT,
+                scanner=self.scanner,
             )
         )
         self.client = TestClient(self.app)
@@ -269,6 +302,48 @@ class Lab:
             headers.append((b"content-length", str(length).encode()))
         return Client(method="PUT", path=self.content_path(delivery_id, production), headers=headers, inbound=list(chunks), then=then, **kwargs)
 
+    def seal_path(self, delivery_id: str, production: str | None = None) -> str:
+        return f"{self.deliveries_path(production)}/{quote(delivery_id, safe='')}/seal"
+
+    def seal(self, delivery_id: str, subject: str | None = "vendor-1", production: str | None = None, **options):
+        return self.send("POST", self.seal_path(delivery_id, production), subject=subject, **options)
+
+    def delivered(self, content: bytes, subject: str = "vendor-1", production: str | None = None, **declared) -> str:
+        """A delivery declared truthfully for `content` (its real size and SHA-256) and uploaded: ready to be sealed."""
+        fields = {
+            "display_name": "shot-020.png", "declared_media_type": "image/png",
+            "declared_size": len(content), "declared_sha256": sha256_hex(content), **declared,
+        }  # fmt: skip
+        delivery = self.new_delivery(subject, production, **fields)
+        assert self.upload(delivery, content, subject, production).status_code == 201
+        return delivery
+
+    def stored_path(self, delivery_id: str) -> Path:
+        return self.quarantine_root / self.delivery_row(delivery_id)["storage_key"]
+
+    def verdict_rows(self) -> list[dict]:
+        conn = REAL_CONNECT(self.path)
+        try:
+            return [dict(row) for row in conn.execute("SELECT * FROM verdicts ORDER BY rowid")]
+        finally:
+            conn.close()
+
+    def seed_verdict(self, sha256: str, *, engine=None, verdict: str = "no_detection", scanned_sha256: str | None = None,
+                     scanned_at: int | None = None, valid_until: int | None = None) -> str:  # fmt: skip
+        """A verdict row made directly in the store, by default for this lab's scanner and valid for twelve more hours."""
+        engine = engine or self.scanner.engine
+        scanned_at = to_micros(T0 - timedelta(hours=1)) if scanned_at is None else scanned_at
+        conn = REAL_CONNECT(self.path)
+        try:
+            with store.transaction(conn):
+                return store.add_verdict(
+                    conn, sha256=sha256, engine_id=engine.id, engine_version=engine.version, engine_kind=engine.kind,
+                    policy_fingerprint=engine.policy_fingerprint, verdict=verdict, scanned_sha256=scanned_sha256 or sha256,
+                    scanned_at=scanned_at, valid_until=to_micros(T0 + timedelta(hours=12)) if valid_until is None else valid_until,
+                )  # fmt: skip
+        finally:
+            conn.close()
+
     def delivery_rows(self) -> list[dict]:
         conn = REAL_CONNECT(self.path)
         try:
@@ -289,10 +364,7 @@ class Lab:
                 owner = conn.execute("SELECT id FROM subjects WHERE issuer = ? AND subject = ?", (tokens.ISSUER, subject)).fetchone()[0]
                 created = store.add_delivery(conn, FixedClock(SEEDED_AT), production or self.alpha, owner, values["display_name"], values["declared_size"], values["declared_sha256"], values["declared_media_type"])
                 for step in STATE_ROUTES[state]:
-                    conn.execute(
-                        "UPDATE deliveries SET state = ?, received_size = 7, received_sha256 = ?, uploaded_at = ? WHERE id = ?",
-                        (step, "d" * 64, to_micros(SEEDED_AT), created.id),
-                    )
+                    advance_row(conn, created.id, step, to_micros(SEEDED_AT))
         finally:
             conn.close()
         return created
@@ -404,8 +476,8 @@ class Spy:
 def make_lab(tmp_path):
     labs: list[Lab] = []
 
-    def make(name: str = "lab") -> Lab:
-        labs.append(Lab(tmp_path, name))
+    def make(name: str = "lab", scanner=None) -> Lab:
+        labs.append(Lab(tmp_path, name, scanner))
         return labs[-1]
 
     yield make
@@ -637,4 +709,5 @@ def denial(subject: str, production_id: str | None, reason: str, *, at: datetime
         "object_type": None,
         "object_id": None,
         "reason": reason,
+        "engine_kind": None,  # an access denial is not about a scanner verdict
     }

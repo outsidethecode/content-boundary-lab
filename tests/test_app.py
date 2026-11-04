@@ -12,6 +12,7 @@ from support import token_issuer as tokens
 
 from content_boundary_lab.app import Dependencies, create_app
 from content_boundary_lab.clock import SystemClock
+from content_boundary_lab.scanner import LabSyntheticMarkerScanner
 
 # A slice that adds a route must add it here, in the same change.
 ALLOWED_ROUTES: frozenset[tuple[str, frozenset[str]]] = frozenset(
@@ -22,6 +23,7 @@ ALLOWED_ROUTES: frozenset[tuple[str, frozenset[str]]] = frozenset(
         ("/productions/{production_id:path}/assets/{asset_id:path}", frozenset({"GET"})),
         ("/productions/{production_id:path}/deliveries", frozenset({"POST"})),
         ("/productions/{production_id:path}/deliveries/{delivery_id:path}/content", frozenset({"PUT"})),
+        ("/productions/{production_id:path}/deliveries/{delivery_id:path}/seal", frozenset({"POST"})),
     }
 )
 UNSERVED_PATHS = ["/", "/docs", "/docs/oauth2-redirect", "/redoc", "/openapi.json"]
@@ -36,6 +38,7 @@ def _complete(tmp_path: Path) -> dict:
         "asset_root": tmp_path / "assets",
         "quarantine_root": tmp_path / "quarantine",
         "max_upload_bytes": 1_048_576,
+        "scanner": LabSyntheticMarkerScanner(),
     }
 
 
@@ -79,7 +82,7 @@ def test_dependencies_is_a_frozen_dataclass(tmp_path):
 
 def test_dependencies_hold_exactly_the_approved_fields_and_no_selector():
     fields = [field.name for field in dataclasses.fields(Dependencies)]
-    assert fields == ["settings", "clock", "database_path", "asset_root", "quarantine_root", "max_upload_bytes"]
+    assert fields == ["settings", "clock", "database_path", "asset_root", "quarantine_root", "max_upload_bytes", "scanner"]
 
 
 def test_dependencies_are_all_required_and_nothing_else_is_accepted(tmp_path):
@@ -111,12 +114,34 @@ def test_dependencies_are_all_required_and_nothing_else_is_accepted(tmp_path):
         ("max_upload_bytes", None),
         ("max_upload_bytes", 1024.0),
         ("max_upload_bytes", True),  # a bool is an int in Python, and is not a size
+        ("scanner", None),
+        ("scanner", object()),
+        ("scanner", "lab-synthetic-marker"),
+        ("scanner", LabSyntheticMarkerScanner),  # the class, not a scanner
     ],
     ids=repr,
 )
 def test_dependencies_validate_their_types(tmp_path, name, invalid):
     with pytest.raises(TypeError, match=name):
         Dependencies(**{**_complete(tmp_path), name: invalid})
+
+
+def test_there_is_no_default_scanner_the_composition_root_must_pass_one(tmp_path):
+    """Addendum §5.3: create_app has no default scanner."""
+    complete = _complete(tmp_path)
+    del complete["scanner"]
+    with pytest.raises(TypeError):
+        Dependencies(**complete)
+    assert dataclasses.fields(Dependencies)[-1].default is dataclasses.MISSING
+
+
+def test_a_scanner_must_say_what_it_is_so_that_a_verdict_can_be_bound_to_it(tmp_path):
+    class Anonymous:
+        def scan(self, stream, *, timeout_seconds):
+            raise AssertionError("never called")
+
+    with pytest.raises(TypeError, match="scanner"):
+        Dependencies(**{**_complete(tmp_path), "scanner": Anonymous()})
 
 
 @pytest.mark.parametrize("limit", [0, -1, 2**63])
@@ -209,6 +234,7 @@ def test_openapi_schema_describes_only_the_approved_routes(app):
         "/productions/{production_id}/assets/{asset_id}",
         "/productions/{production_id}/deliveries",
         "/productions/{production_id}/deliveries/{delivery_id}/content",
+        "/productions/{production_id}/deliveries/{delivery_id}/seal",
     }
 
 

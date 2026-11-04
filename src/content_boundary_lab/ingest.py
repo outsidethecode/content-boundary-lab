@@ -104,7 +104,8 @@ _INITIATED = store.DeliveryState.INITIATED.value
 
 # The only SQL that names the deliveries table in this module (tests/guards/test_delivery_scope.py checks that).
 _LOOKUP = (
-    "SELECT d.id, d.production_id, d.owner_subject_id, d.storage_key, d.state FROM deliveries AS d "
+    "SELECT d.id, d.production_id, d.owner_subject_id, d.storage_key, d.state, d.declared_size, d.declared_sha256, "
+    "d.received_size, d.received_sha256 FROM deliveries AS d "
     "JOIN engagements AS e ON e.production_id = d.production_id AND e.subject_id = d.owner_subject_id "
     "JOIN subjects AS s ON s.id = d.owner_subject_id "
     "WHERE d.id = ? AND d.production_id = ? AND s.issuer = ? AND s.subject = ? "
@@ -120,13 +121,21 @@ _COMMITTED = "SELECT id, storage_key FROM deliveries WHERE state != 'INITIATED'"
 
 @dataclass(frozen=True)
 class Delivery:
-    """A delivery the caller owns and may reach now. The storage key never leaves the server."""
+    """A delivery the caller owns and may reach now. The storage key never leaves the server.
+
+    declared_size and declared_sha256 are the vendor's claims, for comparison with what the server measures at seal time
+    and for nothing else; received_size and received_sha256 are the intake receipt (None before the upload).
+    """
 
     id: str
     production_id: str
     owner_subject_id: int
     storage_key: str
     state: str
+    declared_size: int
+    declared_sha256: str
+    received_size: int | None
+    received_sha256: str | None
 
 
 def get_delivery_in_scope(
@@ -151,7 +160,7 @@ def get_delivery_in_scope(
     if not conn.in_transaction:
         raise StoreError("a delivery lookup must run inside the caller's transaction")
     row = conn.execute(_LOOKUP, (delivery_id, production_id, caller.issuer, caller.subject, now_micros)).fetchone()
-    return None if row is None else Delivery(row[0], row[1], row[2], row[3], row[4])
+    return None if row is None else Delivery(*row)
 
 
 # --- declaring a delivery -----------------------------------------------------------------------------------------------

@@ -17,6 +17,11 @@ INSERT_ASSET = "INSERT INTO assets (id, production_id, display_name, created_at)
 OK = sqlite3.SQLITE_OK
 DENY = sqlite3.SQLITE_DENY
 TRIGGERS = [
+    "deliveries_seal_is_final",
+    "deliveries_pass_needs_a_matching_verdict",
+    "verdicts_are_not_replaced",
+    "verdicts_are_kept",
+    "verdicts_are_immutable",
     "deliveries_start_as_initiated",
     "deliveries_are_not_replaced",
     "deliveries_are_kept",
@@ -103,7 +108,7 @@ def _snapshot(connection):
 AUDIT_TABLE_WITHOUT_CHECKS = (
     "CREATE TABLE audit_events (seq INTEGER PRIMARY KEY AUTOINCREMENT, at INTEGER NOT NULL, actor_issuer TEXT, "
     "actor_subject TEXT, action TEXT NOT NULL, outcome TEXT NOT NULL, production_id TEXT, object_type TEXT, "
-    "object_id TEXT, reason TEXT) STRICT"
+    "object_id TEXT, reason TEXT, engine_kind TEXT) STRICT"
 )
 DRIFT = {
     "extra table": ["CREATE TABLE extra (x)"],

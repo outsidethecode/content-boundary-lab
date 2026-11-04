@@ -27,12 +27,15 @@ directory is not, and nothing claims otherwise. A network filesystem is not supp
 """
 
 import hashlib
+import io
 import os
 import re
 import secrets
 import stat
+from collections.abc import Iterator
 from dataclasses import dataclass
 from pathlib import Path
+from typing import BinaryIO
 
 INCOMING = ".incoming"
 _NAME = re.compile(r"[0-9a-f]{32}")
@@ -303,3 +306,163 @@ def scan(root: Path) -> Contents:
         return Contents(tuple(finals), tuple(incoming), tuple(sorted(foreign)))
     finally:
         os.close(root_fd)
+
+
+# --- reading a stored file back, to seal it (M1I) ---------------------------------------------------------------------
+#
+# One descriptor, opened once. It is opened without following a symlink and must be a regular file, by the opaque storage
+# key under the validated root. Every read is `pread` at an explicit offset, so no pass depends on where an earlier one
+# stopped and nothing is shared between the hashing pass, the signature look and the scanner's stream. The path is never
+# opened a second time: what is hashed and what is scanned is the file this descriptor refers to, even if the name is
+# replaced meanwhile. A digest of these bytes does not make them immutable: storage is mutable, so the check below can
+# only notice a change that happened while the file was being inspected, and the promotion re-hash (F-04) stays necessary.
+
+
+class QuarantineStorageError(QuarantineError):
+    """The entry at a storage key is not a regular file."""
+
+
+class QuarantineChanged(QuarantineError):
+    """The stored file changed, or the name no longer leads to it, while it was being inspected."""
+
+
+_STORED = os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK | os.O_CLOEXEC
+READ_CHUNK = 64 * 1024
+
+
+def _fingerprint(info: os.stat_result) -> tuple[int, int, int, int, int]:
+    """What identifies this file in this state: device, inode, size, and the two times a write cannot leave alone."""
+    return (info.st_dev, info.st_ino, info.st_size, info.st_mtime_ns, info.st_ctime_ns)
+
+
+class _StoredStream(io.RawIOBase):
+    """A read-only stream over a StoredFile from offset 0. It has its own position; closing it closes nothing else."""
+
+    def __init__(self, stored: "StoredFile") -> None:
+        super().__init__()
+        self._stored = stored
+        self._position = 0
+
+    def readable(self) -> bool:
+        return True
+
+    def seekable(self) -> bool:
+        return True
+
+    def tell(self) -> int:
+        return self._position
+
+    def seek(self, offset: int, whence: int = io.SEEK_SET) -> int:
+        base = {io.SEEK_SET: 0, io.SEEK_CUR: self._position, io.SEEK_END: self._stored.size}[whence]
+        self._position = max(0, base + offset)
+        return self._position
+
+    def readinto(self, buffer) -> int:
+        data = self._stored._pread(len(buffer), self._position)
+        buffer[: len(data)] = data
+        self._position += len(data)
+        return len(data)
+
+
+class StoredFile:
+    """A quarantined file opened for inspection. Make one with open_stored(); use it as a context manager."""
+
+    def __init__(self, root_fd: int, name: str, fd: int, info: os.stat_result) -> None:
+        self._root_fd: int | None = root_fd
+        self._fd: int | None = fd
+        self._name = name
+        self._fingerprint = _fingerprint(info)
+        self.size = info.st_size  # measured from the descriptor at the moment it was opened
+
+    def _require_open(self) -> int:
+        if self._fd is None:
+            raise ValueError("the stored file is closed")
+        return self._fd
+
+    def _pread(self, count: int, offset: int) -> bytes:
+        return os.pread(self._require_open(), count, offset)
+
+    def chunks(self, chunk_size: int = READ_CHUNK) -> Iterator[bytes]:
+        """The whole file, from offset 0, in blocks. A change noticed at the end of the pass is an error, not a result.
+
+        It reads exactly the size measured at open. Fewer bytes, or any change since the file was opened (including more
+        bytes appended), raises QuarantineChanged when the pass ends, so a digest made from it describes a file that did
+        not change under it.
+        """
+        self._require_open()
+        if type(chunk_size) is not int or chunk_size < 1:
+            raise ValueError("chunk_size must be a positive int")
+        offset = 0
+        while offset < self.size:
+            block = self._pread(min(chunk_size, self.size - offset), offset)
+            if not block:
+                break
+            offset += len(block)
+            yield block
+        if offset != self.size:
+            raise QuarantineChanged("the stored file is shorter than when it was opened")
+        self.ensure_unchanged()
+
+    def head(self, count: int) -> bytes:
+        """At most `count` bytes from offset 0, for looking at a signature. It moves no position."""
+        self._require_open()
+        if type(count) is not int:
+            raise TypeError(f"count must be an int, got {type(count).__name__}")
+        if count < 0:
+            raise ValueError("count must not be negative")
+        return self._pread(min(count, self.size), 0)
+
+    def scan_stream(self) -> BinaryIO:
+        """A readable stream over the same descriptor, positioned at offset 0. The caller (a scanner) reads it to its end."""
+        self._require_open()
+        return _StoredStream(self)
+
+    def ensure_unchanged(self) -> None:
+        """Raise QuarantineChanged unless the file is as it was when opened and the name still leads to this very file."""
+        fd = self._require_open()
+        if _fingerprint(os.fstat(fd)) != self._fingerprint:
+            raise QuarantineChanged("the stored file changed while it was being inspected")
+        try:
+            named = os.stat(self._name, dir_fd=self._root_fd, follow_symlinks=False)
+        except FileNotFoundError:
+            raise QuarantineChanged("the storage key no longer leads to the file that was inspected") from None
+        if not stat.S_ISREG(named.st_mode) or (named.st_dev, named.st_ino) != self._fingerprint[:2]:
+            raise QuarantineChanged("the storage key no longer leads to the file that was inspected")
+
+    def close(self) -> None:
+        fd, root_fd, self._fd, self._root_fd = self._fd, self._root_fd, None, None
+        if fd is not None:
+            os.close(fd)
+        if root_fd is not None:
+            os.close(root_fd)
+
+    def __enter__(self) -> "StoredFile":
+        return self
+
+    def __exit__(self, *exc_info) -> None:
+        self.close()
+
+
+def open_stored(root: Path, storage_key: str) -> StoredFile:
+    """Open the file stored under `storage_key` for inspection: no symlink followed, a regular file or an error.
+
+    The key is the delivery's opaque storage key (32 lower-case hexadecimal characters), the only thing that names the
+    file; the root is opened without following a symlink. The file is opened non-blocking, so a pipe cannot hold the
+    request, and fstat on the descriptor that was opened decides whether it is a regular file. Raises FileNotFoundError,
+    OSError (a symlink, a permission) or QuarantineStorageError; every descriptor opened is closed on failure.
+    """
+    _check_name(storage_key)
+    root_fd = _open_root(root)
+    try:
+        fd = os.open(storage_key, _STORED, dir_fd=root_fd)
+        try:
+            info = os.fstat(fd)
+            if not stat.S_ISREG(info.st_mode):
+                raise QuarantineStorageError("the stored entry is not a regular file")
+        except BaseException:
+            os.close(fd)
+            raise
+    except BaseException:
+        os.close(root_fd)
+        raise
+    return StoredFile(root_fd, storage_key, fd, info)

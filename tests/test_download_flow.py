@@ -68,6 +68,7 @@ def read_event(lab, *, at=T0, seq=1) -> dict:
         "object_type": None,
         "object_id": None,
         "reason": None,
+        "engine_kind": None,
     }
 
 

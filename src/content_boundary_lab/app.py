@@ -5,8 +5,9 @@ from pathlib import Path
 
 from fastapi import FastAPI
 
-from content_boundary_lab import assets, engagements, ingest, management
+from content_boundary_lab import assets, engagements, ingest, management, trust
 from content_boundary_lab.clock import Clock
+from content_boundary_lab.scanner import EngineIdentity, Scanner
 from content_boundary_lab.settings import TrustedSettings
 
 MAX_SQLITE_INTEGER = 2**63 - 1
@@ -24,9 +25,11 @@ class Dependencies:
     send, counted as they arrive. Both roots must be absolute paths (a relative one would depend on the working
     directory), and they must be separate: neither may be, contain or lead to the other, so that nothing that can write
     quarantine can write the trusted root. The upload limit is a deployment choice made by whoever builds the
-    dependencies, not a default of the application. There is no authorisation function to substitute and no switch for a
-    vulnerable variant: the reference application has exactly one way to decide. Later slices add fields only when a
-    reviewed change needs them.
+    dependencies, not a default of the application. scanner is the one scanner the application seals deliveries with: it
+    has no default (Addendum §5.3), so the composition root names it, and it must say what it is (an EngineIdentity) so
+    that a verdict can be bound to it. There is no authorisation function to substitute and no switch for a vulnerable
+    variant: the reference application has exactly one way to decide. Later slices add fields only when a reviewed
+    change needs them.
     """
 
     settings: TrustedSettings
@@ -35,6 +38,7 @@ class Dependencies:
     asset_root: Path
     quarantine_root: Path
     max_upload_bytes: int
+    scanner: Scanner
 
     def __post_init__(self) -> None:
         for name, kind in (
@@ -51,6 +55,11 @@ class Dependencies:
             raise TypeError(f"max_upload_bytes must be an int, got {type(self.max_upload_bytes).__name__}")
         if not 1 <= self.max_upload_bytes <= MAX_SQLITE_INTEGER:
             raise ValueError("max_upload_bytes must be between 1 and 2**63 - 1")
+        if not isinstance(self.scanner, Scanner) or not isinstance(self.scanner.engine, EngineIdentity):
+            raise TypeError(
+                "scanner must be a Scanner: an object with a scan() method and an EngineIdentity as its engine, "
+                f"got {type(self.scanner).__name__}"
+            )
         for name in ("asset_root", "quarantine_root"):
             if not getattr(self, name).is_absolute():
                 raise ValueError(f"{name} must be an absolute path")
@@ -96,5 +105,10 @@ def create_app(deps: Dependencies) -> FastAPI:
             deps.settings, deps.clock, deps.database_path, deps.quarantine_root, deps.max_upload_bytes
         ),
         methods=["PUT"],
+    )
+    app.add_api_route(
+        trust.SEAL_PATH,
+        trust.build_endpoint(deps.settings, deps.clock, deps.database_path, deps.quarantine_root, deps.scanner),
+        methods=["POST"],
     )
     return app

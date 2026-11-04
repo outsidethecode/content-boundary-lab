@@ -9,8 +9,9 @@ from types import SimpleNamespace
 import pytest
 
 from content_boundary_lab import audit, store
-from content_boundary_lab.audit import Actor, AuditAction, AuditReason, ObjectType, Outcome
+from content_boundary_lab.audit import Actor, AuditAction, AuditReason, EngineKind, ObjectType, Outcome
 from content_boundary_lab.clock import to_micros
+from content_boundary_lab.scanner import KINDS
 
 UTC = timezone.utc
 T0 = datetime(2026, 11, 3, 12, 0, 0, 123457, tzinfo=UTC)  # 1793707200123457 microseconds since the epoch
@@ -30,6 +31,11 @@ VOCABULARY = {
         "delivery.upload_started",
         "delivery.uploaded",
         "delivery.upload_failed",
+        "delivery.seal_started",
+        "delivery.scan_passed",
+        "delivery.verdict_reused",
+        "delivery.rejected",
+        "delivery.scan_failed",
     },
     AuditReason: {
         "no_engagement",
@@ -44,9 +50,16 @@ VOCABULARY = {
         "payload_too_large",
         "state_conflict",
         "upload_interrupted",
+        "checksum_mismatch",
+        "unsupported_type",
+        "detection",
+        "scanner_unavailable",
+        "scanner_timeout",
+        "scanner_bad_response",
     },
     ObjectType: {"production", "engagement", "asset", "subject", "delivery"},
     Outcome: {"allowed", "denied", "recorded"},
+    EngineKind: {"synthetic"},  # the kinds M0 permits (Addendum §5.3); a real engine would be a reviewed addition
 }
 
 
@@ -293,8 +306,112 @@ def test_an_event_records_every_field_exactly(conn, clock):
             "object_type": "asset",
             "object_id": "b" * 32,
             "reason": "not_found_or_forbidden",
+            "engine_kind": None,  # an access denial is not about a scanner verdict
         }
     ]
+
+
+# --- the engine kind (M0 Addendum §5.3: engine.kind appears in every verdict-bearing audit event) ------------------------
+#
+# One small constrained column, never free text. It is required on the events that are about a scanner's verdict or about
+# a scan that could not produce one (the configured scanner's kind), forbidden on every other event, and NULL for them.
+
+DELIVERY = {"object_type": ObjectType.DELIVERY, "object_id": "d" * 32}
+VERDICT_BEARING = {
+    "a scan that passed": (AuditAction.DELIVERY_SCAN_PASSED, Outcome.RECORDED, None),
+    "a verdict reused": (AuditAction.DELIVERY_VERDICT_REUSED, Outcome.RECORDED, None),
+    "a scan that failed (timeout)": (AuditAction.DELIVERY_SCAN_FAILED, Outcome.RECORDED, AuditReason.SCANNER_TIMEOUT),
+    "a scan that failed (unavailable)": (AuditAction.DELIVERY_SCAN_FAILED, Outcome.RECORDED, AuditReason.SCANNER_UNAVAILABLE),
+    "a scan that failed (bad response)": (AuditAction.DELIVERY_SCAN_FAILED, Outcome.RECORDED, AuditReason.SCANNER_BAD_RESPONSE),
+    "a detection": (AuditAction.DELIVERY_REJECTED, Outcome.DENIED, AuditReason.DETECTION),
+}
+NOT_VERDICT_BEARING = {
+    "an access denial": (AuditAction.ACCESS_DENIED, Outcome.DENIED, AuditReason.NO_ENGAGEMENT),
+    "an engagement created": (AuditAction.ENGAGEMENT_CREATED, Outcome.ALLOWED, None),
+    "an asset read": (AuditAction.ASSET_READ, Outcome.ALLOWED, None),
+    "a delivery declared": (AuditAction.DELIVERY_INITIATED, Outcome.ALLOWED, None),
+    "an upload started": (AuditAction.DELIVERY_UPLOAD_STARTED, Outcome.ALLOWED, None),
+    "an upload completed": (AuditAction.DELIVERY_UPLOADED, Outcome.ALLOWED, None),
+    "a seal started": (AuditAction.DELIVERY_SEAL_STARTED, Outcome.ALLOWED, None),
+    "a request rejected": (AuditAction.DELIVERY_REQUEST_REJECTED, Outcome.DENIED, AuditReason.STATE_CONFLICT),
+    "a checksum mismatch": (AuditAction.DELIVERY_REJECTED, Outcome.DENIED, AuditReason.CHECKSUM_MISMATCH),
+    "an unsupported type": (AuditAction.DELIVERY_REJECTED, Outcome.DENIED, AuditReason.UNSUPPORTED_TYPE),
+}
+
+
+def test_the_engine_kinds_are_exactly_the_kinds_the_scanner_contract_permits():
+    assert {kind.value for kind in EngineKind} == set(KINDS) == {"synthetic"}
+
+
+@pytest.mark.parametrize("case", VERDICT_BEARING.values(), ids=list(VERDICT_BEARING))
+def test_a_verdict_bearing_event_records_the_engine_kind(conn, clock, case):
+    action, outcome, reason = case
+    with store.transaction(conn):
+        _record(conn, clock, action=action, outcome=outcome, reason=reason, engine_kind=EngineKind.SYNTHETIC, **DELIVERY)
+    (event,) = _events(conn)
+    assert event["engine_kind"] == "synthetic" and event["action"] == action.value
+
+
+@pytest.mark.parametrize("case", VERDICT_BEARING.values(), ids=list(VERDICT_BEARING))
+def test_a_verdict_bearing_event_without_the_engine_kind_is_refused_and_writes_nothing(conn, clock, case):
+    action, outcome, reason = case
+    with pytest.raises(ValueError, match="engine_kind"), store.transaction(conn):
+        _record(conn, clock, action=action, outcome=outcome, reason=reason, **DELIVERY)
+    assert _events(conn) == []
+
+
+@pytest.mark.parametrize("case", NOT_VERDICT_BEARING.values(), ids=list(NOT_VERDICT_BEARING))
+def test_an_event_that_is_not_about_a_verdict_stores_null_and_refuses_an_engine_kind(conn, clock, case):
+    action, outcome, reason = case
+    with store.transaction(conn):
+        _record(conn, clock, action=action, outcome=outcome, reason=reason)
+    assert _events(conn)[0]["engine_kind"] is None
+    with pytest.raises(ValueError, match="engine_kind"), store.transaction(conn):
+        _record(conn, clock, action=action, outcome=outcome, reason=reason, engine_kind=EngineKind.SYNTHETIC)
+    assert len(_events(conn)) == 1
+
+
+@pytest.mark.parametrize("value", ["synthetic", "real", "clean", "", 1, b"synthetic", True, ["synthetic"]], ids=repr)
+def test_the_engine_kind_must_be_a_member_of_the_closed_vocabulary_not_a_string(conn, clock, value):
+    with pytest.raises(TypeError, match="engine_kind"), store.transaction(conn):
+        _record(conn, clock, action=AuditAction.DELIVERY_SCAN_PASSED, outcome=Outcome.RECORDED, engine_kind=value)
+    assert _events(conn) == []
+
+
+@pytest.mark.parametrize("value", ["real", "SYNTHETIC", "synthetic ", "clean", "safe", "", "x" * 200, "synthetic'; --"])
+def test_the_database_refuses_any_engine_kind_outside_the_vocabulary_even_when_written_directly(conn, value):
+    with pytest.raises(sqlite3.IntegrityError), store.transaction(conn):
+        conn.execute("INSERT INTO audit_events (at, action, outcome, engine_kind) VALUES (1, 'x', 'recorded', ?)", (value,))
+    with store.transaction(conn):  # NULL and the one permitted value are accepted
+        conn.execute("INSERT INTO audit_events (at, action, outcome, engine_kind) VALUES (1, 'x', 'recorded', NULL)")
+        conn.execute("INSERT INTO audit_events (at, action, outcome, engine_kind) VALUES (1, 'x', 'recorded', 'synthetic')")
+
+
+def test_an_event_with_an_engine_kind_stays_append_only(conn, clock):
+    with store.transaction(conn):
+        seq = _record(conn, clock, action=AuditAction.DELIVERY_SCAN_PASSED, outcome=Outcome.RECORDED, engine_kind=EngineKind.SYNTHETIC)
+    before = _events(conn)
+    for statement in (
+        "UPDATE audit_events SET engine_kind = NULL WHERE seq = ?",
+        "UPDATE audit_events SET engine_kind = 'synthetic' WHERE seq = ?",
+        "DELETE FROM audit_events WHERE seq = ?",
+    ):
+        with pytest.raises(sqlite3.DatabaseError):
+            conn.execute(statement, (seq,))
+    with pytest.raises(sqlite3.DatabaseError):
+        conn.execute(
+            "INSERT OR REPLACE INTO audit_events (seq, at, action, outcome) VALUES (?, 1, 'forged', 'recorded')", (seq,)
+        )
+    assert _events(conn) == before
+
+
+def test_the_engine_kind_is_one_of_the_columns_the_schema_check_protects(db_path, conn):
+    conn.close()
+    raw = sqlite3.connect(db_path)
+    raw.execute("ALTER TABLE audit_events DROP COLUMN engine_kind")
+    raw.close()
+    with pytest.raises(store.SchemaIntegrityError, match="audit_events"):
+        store.connect(db_path)
 
 
 def test_an_unauthenticated_event_stores_null_actor_fields(conn, clock):
