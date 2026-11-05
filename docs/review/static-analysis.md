@@ -230,7 +230,7 @@ versions went to the PyPI vulnerability service; no source went anywhere. No too
 | `detect-secrets scan --all-files` (all 27 detectors) | the 153 files that are tracked or are new in M5, including all nine evidence files | the same 4 detections at the same four lines as TF-13; none new |
 | `grep` for PEM private-key blocks, JWT-shaped strings and AWS, GitHub, Slack, Google and PyPI token shapes | those 153 files | none |
 | the same shapes, `git log --all -p` | the 28 commits that existed before the M5 commit, all refs | none |
-| the built wheel and source distribution, built from the committed tree with the pinned backend | wheel: the 19 modules of `content_boundary_lab` and its metadata (23 files); sdist: 29 files and 4 directory entries | no `labs/`, `tests/`, `tools/`, `docs/`, `.github/`, no module named for a vulnerable variant, and no key, database or `.env` file |
+| the built wheel and source distribution, built from the committed tree with the pinned backend | wheel: the 19 modules of `content_boundary_lab`, its metadata and the licence file (24 files); sdist: 30 files and 4 directory entries | no `labs/`, `tests/`, `tools/`, `docs/`, `.github/`, no module named for a vulnerable variant, and no key, database or `.env` file |
 
 The standing guards for the last row are `tests/test_packaging.py` (which also shows that its checker notices a planted
 `labs/` package) and `tests/guards/test_isolation.py`. A grep of `src/` for `labs`, `vulnerable`, dynamic import calls and
