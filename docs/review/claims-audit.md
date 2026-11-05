@@ -1,7 +1,8 @@
 # Claims audit (M4)
 
 M0 asks for "a claims audit tracing every README security claim to a test ID". The [claims register](../claims.md) already
-cites tests for each of its 29 claims, and `tests/test_docs.py` checks that every cited test exists. This audit asks the harder
+cites tests for each of its claims (29 when this audit was made, 32 after M5 added C-30 to C-32, which the audit classifies
+but did not mutation-check), and `tests/test_docs.py` checks that every cited test exists. This audit asks the harder
 question: **is each claim as strong as its evidence, and would that evidence notice if the control behind it were broken?**
 
 It did not take the register's own word for anything. It did four things.
@@ -14,7 +15,7 @@ It did not take the register's own word for anything. It did four things.
 3. **Challenged the wording** the task named as likely to overreach (section 3).
 4. **Traced every statement the README makes about the lab** to a claim (section 4).
 
-The independent reviewers' findings on claims are in [fresh-context-review.md](fresh-context-review.md); where they bear on a
+The fresh-context reviewers' findings on claims are in [fresh-context-review.md](fresh-context-review.md); where they bear on a
 classification, section 1 says so. All of this was done by the model that wrote the code and by sub-agents of the same model,
 so none of it is an independent review in the sense M0 D10 means; a human reviewer is still pending.
 
@@ -58,6 +59,9 @@ the tests do not show. **Out of scope** means the lab disclaims it. The standing
 | C-27 | Demonstrated | None. | None. |
 | C-28 | Demonstrated | For the rows the matrices hold; a row not in a matrix is not covered. | None. |
 | C-29 | Supported, subject to an assumption | "No token, marker, request value, path or internal error appears" is a universal negative demonstrated for a wide set of requests, not exhaustively. | Text says "in the requests the tests make". |
+| C-30 | Supported, subject to an assumption | The guard reads the text of the workflow; no run on GitHub has taken place, so nothing shows how a hosted runner treats the file. Added at M5, after the mutation check. | The claim says "as written" and "has not been run". |
+| C-31 | Demonstrated | For the checks it makes: it does not compare prose with code beyond quoted snippets and quoted evidence lines, and the `--final` check relies on `git`. Added at M5, after the mutation check. | None. |
+| C-32 | Demonstrated | The header describes the tree at the time of the run; a later change is noticed only by `check_docs.py --final`. Added at M5, after the mutation check. | None. |
 
 No claim is **Not yet demonstrated** as the register words it after the wording actions above. What the documents say or
 imply that is not demonstrated is listed in section 5.

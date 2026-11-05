@@ -1,6 +1,7 @@
 """`python -m labs`: run all four demonstrations and say how many were reproduced and how many the reference blocked.
 
-`python -m labs --evidence docs/evidence` also writes one evidence file per finding. A finding is `python -m labs.fNN_...`.
+`python -m labs --evidence docs/evidence` also writes one evidence file per finding and `summary.txt`, which holds the lines
+the README quotes. A finding is `python -m labs.fNN_...`.
 """
 
 import argparse
@@ -22,7 +23,15 @@ def main(argv: list[str] | None = None) -> int:
         results.append(demo.main(finding, options) == 0)
         print()
     done = sum(results)
-    print(f"{done} exploits reproduced against the seeded variants; {done} blocked by the reference ({len(FINDINGS)} findings).")
+    summary = f"{done} exploits reproduced against the seeded variants; {done} blocked by the reference ({len(FINDINGS)} findings)."
+    print(summary)
+    if arguments.evidence is not None:  # the README quotes this run, so it is evidence too
+        lines = [
+            f"{finding.ID}  seeded variant exploited and reference blocked: {'YES' if ok else 'NO'}  ({finding.TITLE})"
+            for finding, ok in zip(FINDINGS, results, strict=True)
+        ]
+        command = f"python -m labs --evidence {arguments.evidence}"
+        (arguments.evidence / "summary.txt").write_text(demo.header(command) + "\n".join([*lines, "", summary]) + "\n", encoding="utf-8")
     return 0 if all(results) else 1
 
 

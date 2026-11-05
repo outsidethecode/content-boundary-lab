@@ -193,4 +193,49 @@ secret in a form no detector knows, and it says nothing about files that are not
   hosted engines would have meant uploading source.
 - No fuzzing, no dynamic scanner against the running server beyond the existing `pytest -m real_server`.
 - `pip-audit` has a known-vulnerability database's reach and no more: a new advisory published after 2026-11-04 is not
-  covered, and the audit should be repeated at M5, immediately before publication.
+  covered, and the audit should be repeated at M5, immediately before publication (it was, on 2026-11-05: section 7; an
+  advisory published after that date is again not covered).
+
+## 6. Addendum at M5: the code M5 added
+
+M5 added one script and changed two files under `labs/` (AM-31). It was not a broad rerun: Ruff 0.17.1 (the security and
+correctness selection of section 1) and Bandit 1.9.4 ran over `tools/check_docs.py`, `labs/demo.py` and `labs/__main__.py` only.
+The test files M5 added were read with the same Ruff selection (S101 and F811 ignored, as in section 1). `src/` was not
+touched by M5; the one `src/` file changed after the M4 scans, `store.py` (the revocation timestamp, M4-20), was read with the
+same selection and Bandit on the day it changed, and has no finding.
+
+| ID | Where | Rule | Decision |
+|---|---|---|---|
+| TF-14 | `tools/check_docs.py` (one call), `labs/demo.py` (two calls) | Bandit `B404`, `B603`, `B607` (low); Ruff `S603`, `S607` | **Accepted.** Each calls `git` with a fixed list of arguments and no shell. In `labs/demo.py` no argument comes from outside the code. In `tools/check_docs.py` the commit string comes from an evidence file; see TF-15 |
+| TF-15 | `tools/check_docs.py`, found by reading the script while writing it and fixed before M5 was reviewed | argument injection into `git` (CWE-88) and a read outside the repository (CWE-22) | **Fixed, test first.** A `commit` field that is not 7 to 40 lowercase hexadecimal characters is reported and never handed to `git`, and a snippet or evidence marker that names a file outside the repository is reported and not read (`tests/test_check_docs.py`, the cases with `--exec-path`, `-h` and `../outside.py`). A pull request can change both the evidence files and the markers, and the workflow runs this script on pull requests with a read-only token, so the inputs were not trusted ones |
+
+The numbers: Ruff reports four findings in these three files (`S603` 1 and `S607` 3, all TF-14) and none in the new tests beyond
+`S603` for their `subprocess` calls and `F401` for the pytest fixtures they import, which section 1 already accepts; Bandit reports eight low findings (`B404` 2, `B603` 3, `B607`
+3, the same fixed `git` calls) and no medium or high. The dependency audit and the secret scan were not repeated here: the lock
+did not change; section 7 repeats them, and both are due again on the commit that will be published (docs/publication.md
+section 6).
+
+## 7. Addendum at M5: the dependency audit and the secret scan repeated (2026-11-05)
+
+Run on the tree that became the M5 implementation commit: the committed `b5982c3` plus the M5 files, with `src/`,
+`requirements.lock`, `pyproject.toml` and `MANIFEST.in` identical to `b5982c3`. The tools and versions are those of M4
+(pip-audit 2.10.1, detect-secrets 1.5.0, from the same disposable environment outside the repository). Package names and
+versions went to the PyPI vulnerability service; no source went anywhere. No tool configuration or dependency was added.
+
+| Check | Scope | Result |
+|---|---|---|
+| `pip-audit -r requirements.lock --no-deps --disable-pip --require-hashes` | the 25 locked distributions | **No known vulnerabilities.** |
+| `pip-audit -r` of `setuptools==84.2.1` | the pinned build backend | **No known vulnerabilities.** |
+| `pip-audit --path` the verified test environment | 27 distributions, the project skipped (not on PyPI) | **The same six advisories in `pip 25.2` as TF-12** (the service lists each under two aliases, twelve rows); none in a locked package. Nothing new since M4 |
+| `detect-secrets scan --all-files` (all 27 detectors) | the 153 files that are tracked or are new in M5, including all nine evidence files | the same 4 detections at the same four lines as TF-13; none new |
+| `grep` for PEM private-key blocks, JWT-shaped strings and AWS, GitHub, Slack, Google and PyPI token shapes | those 153 files | none |
+| the same shapes, `git log --all -p` | the 28 commits that existed before the M5 commit, all refs | none |
+| the built wheel and source distribution, built from the committed tree with the pinned backend | wheel: the 19 modules of `content_boundary_lab` and its metadata (23 files); sdist: 29 files and 4 directory entries | no `labs/`, `tests/`, `tools/`, `docs/`, `.github/`, no module named for a vulnerable variant, and no key, database or `.env` file |
+
+The standing guards for the last row are `tests/test_packaging.py` (which also shows that its checker notices a planted
+`labs/` package) and `tests/guards/test_isolation.py`. A grep of `src/` for `labs`, `vulnerable`, dynamic import calls and
+environment or command-line access finds the one command line of `runner.py` and docstrings that name the seeded variants;
+nothing selects one at run time.
+
+The limits of section 4 apply again: a scan shows that these patterns are absent from these files, and an audit covers the
+advisories published up to its date.

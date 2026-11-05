@@ -79,6 +79,7 @@ shows it.
 the reference (R), the seeded variant (V), the naive fix above (N1) and a different, complete fix (A1) that requires the asset
 to belong to the production the request named. Verbatim from [docs/evidence/f02-matrix.txt](../evidence/f02-matrix.txt).
 
+<!-- evidence: docs/evidence/f02-matrix.txt -->
 ```text
 row  kind        R    V    N1   A1   what
 L1   legitimate  yes  yes  yes  yes  an ALPHA vendor reads ALPHA's asset through the ALPHA url
@@ -105,6 +106,7 @@ refusal reveals nothing about whether it exists) and not the reference's wording
 
 Verbatim from [docs/evidence/f02.txt](../evidence/f02.txt) (lines elided with … are in the file).
 
+<!-- evidence: docs/evidence/f02.txt -->
 ```text
 == REFERENCE
   2. the same vendor asks for BRAVO's asset through the ALPHA url

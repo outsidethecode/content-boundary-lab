@@ -32,9 +32,14 @@ EVIDENCE = sorted((ROOT / "docs" / "evidence").glob("f??.txt"))  # one run of a 
 MATRIX_EVIDENCE = sorted((ROOT / "docs" / "evidence").glob("f??-matrix.txt"))  # M3: one remediation matrix
 REVIEW_PAGES = sorted((ROOT / "docs" / "review").glob("*.md"))  # M4: the review package, the scan report, the audit, the register
 LABS_README = ROOT / "labs" / "README.md"
-DOCS = [ROOT / "docs" / name for name in ("architecture.md", "threat-model.md", "references.md", "claims.md")] + FINDING_PAGES + REVIEW_PAGES
+DOCS = [
+    ROOT / "docs" / name
+    for name in ("architecture.md", "threat-model.md", "references.md", "claims.md", "walkthrough.md", "publication.md")  # M5: the last two
+] + FINDING_PAGES + REVIEW_PAGES
 README = ROOT / "README.md"
-PAGES = [README, LABS_README, *DOCS]
+SECURITY = ROOT / "SECURITY.md"
+PUBLICATION = ROOT / "docs" / "publication.md"
+PAGES = [README, LABS_README, SECURITY, *DOCS]
 THREAT_MODEL = ROOT / "docs" / "threat-model.md"
 CLAIMS = ROOT / "docs" / "claims.md"
 ARCHITECTURE = ROOT / "docs" / "architecture.md"
@@ -108,6 +113,59 @@ def test_the_readme_points_at_the_register_and_the_other_documents():
     for name in ("docs/architecture.md", "docs/threat-model.md", "docs/claims.md", "docs/references.md", "docs/decisions.md"):
         assert f"]({name})" in page
     assert README_SENTENCE in page
+
+
+# --- the README, SECURITY.md and the licence (M5) -----------------------------------------------------------------------------------
+
+
+def test_the_part_of_the_readme_above_its_quick_start_is_short_enough_to_read_in_about_ninety_seconds():
+    """A measure of length and not of understanding: no cold reader has been tested (docs/publication.md says so)."""
+    head = text(README).split("## Quick start")[0]
+    prose = re.sub(r"\]\([^)]*\)", "]", re.sub(r"```.*?```", " ", head, flags=re.DOTALL))
+    assert 150 <= len(re.findall(r"[A-Za-z0-9][\w'-]*", prose)) <= 360  # about 90 seconds at 240 words a minute
+    for needle in ("*who are you*", "*what may you touch*", "*should these bytes be trusted*", "intentionally vulnerable code"):
+        assert needle in head
+
+
+def test_the_readmes_findings_table_links_each_findings_twin_fix_tests_and_evidence():
+    rows_found = [line for line in text(README).splitlines() if line.startswith("| **F-")]
+    assert [line.split("**")[1] for line in rows_found] == ["F-02", "F-03", "F-04", "F-06"]
+    for line in rows_found:
+        targets = LINK.findall(line)
+        assert [target.split("/")[0] for target in targets] == ["labs", "src", "tests", "docs"], line[:30]
+        assert targets[2].startswith("tests/findings/") and targets[3].startswith("docs/evidence/")
+        assert all((ROOT / target).is_file() for target in targets), line[:30]
+
+
+def test_the_readmes_sections_come_in_the_order_the_design_asked_for():
+    headings = re.findall(r"^## (.+)$", text(README), re.MULTILINE)
+    wanted = ["Quick start", "Implemented, simulated and conceptual", "The findings", "Threat model, design decisions and trade-offs",
+              "Limitations and non-goals", "Responsible use and licence"]  # fmt: skip
+    positions = [headings.index(name) for name in wanted]
+    assert positions == sorted(positions)
+
+
+def test_security_md_separates_what_is_intentional_from_what_to_report_in_the_reference():
+    body = text(SECURITY)
+    intentional = body.split("## What is intentional")[1].split("## What to report")[0]
+    reportable = body.split("## What to report")[1].split("## How to report")[0]
+    assert all(finding in intentional for finding in ("F-02", "F-03", "F-04", "F-06")) and "`labs/`" in intentional
+    assert "threat model" in intentional and "m4-findings.md" in intentional  # the limitations already stated
+    assert "`src/`" in reportable and "wheel" in reportable  # a defect in the reference, and vulnerable code reaching the package
+    assert "## How to report" in body and "## Supported versions" in body
+
+
+def test_the_licence_exists_and_the_readme_says_which_licence_covers_what():
+    licence = text(ROOT / "LICENSE")
+    assert licence.startswith("MIT License\n") and re.search(r"^Copyright \(c\) 2026 \S", licence, re.MULTILINE)
+    page = text(README)
+    assert "[MIT licence](LICENSE)" in page and "CC BY 4.0" in page and "is not affiliated with, endorsed by or sponsored by" in page
+
+
+def test_the_publication_record_is_finished_and_says_nothing_was_pushed():
+    body = text(PUBLICATION)
+    assert "RESULT_" not in body and "TODO" not in body
+    assert "Nothing has been pushed or published" in body and "D10" in body and "pending" in body
 
 
 # --- the threat model --------------------------------------------------------------------------------------------------------
@@ -279,7 +337,7 @@ def test_the_results_in_a_finding_page_are_lines_of_its_evidence_file(page):
 @pytest.mark.parametrize("path", [*EVIDENCE, *MATRIX_EVIDENCE], ids=lambda path: path.name)
 def test_an_evidence_file_records_when_how_and_on_what_it_was_made_and_ends_with_the_result(path):
     body = text(path)
-    for field in ("date     ", "command  ", "commit   ", "python   ", "pinned   ", "status   PROVISIONAL", "note     "):
+    for field in ("date     ", "command  ", "commit   ", "python   ", "pinned   ", "status   (FINAL|PROVISIONAL): ", "note     "):
         assert re.search(rf"^{field}", body, re.MULTILINE), field
     assert "pinned   fastapi==" in body and FIXED_SENTENCE in body
     ending = (

@@ -1,13 +1,13 @@
 # Architecture
 
-This describes the reference implementation as it is built through M1M (M2 and M3 changed nothing in `src/`), one section per thing a reviewer needs in order to
+This describes the reference implementation as it is built through M1M (M2, M3 and M5 changed nothing in `src/`; M4 made four small corrections, AM-30), one section per thing a reviewer needs in order to
 read the code: what the pieces are, where each trust decision is made, how a request and a delivery move, what the database
 refuses on its own, and what is simulated. It does not repeat the reasoning behind each choice; that is in
 [decisions.md](decisions.md) (the amendment, AM-n, is cited where a section depends on one). The threats these controls
 answer are in [threat-model.md](threat-model.md), and every claim made about them is traced to a test in
 [claims.md](claims.md). Where this file and `decisions.md` differ, `decisions.md` wins.
 
-The lab is an independent educational exercise. The application here is the reference: it contains no deliberately
+The lab is an educational exercise. The application here is the reference: it contains no deliberately
 vulnerable code and no switch that selects any. The four seeded variants live outside `src/`, in [labs/](../labs/README.md);
 each replaces one function of the reference for the length of a `with` block, and none is packaged or reachable from the
 application (the seams are listed below).

@@ -36,7 +36,7 @@ reference blocked it.
 ```bash
 python -m labs                      # all four, and a summary
 python -m labs.f02_parent_check     # one finding
-python -m labs --evidence docs/evidence   # also write docs/evidence/fNN.txt under a header (date, command, commit, versions)
+python -m labs --evidence docs/evidence   # also write docs/evidence/fNN.txt and summary.txt under a header (date, command, commit, versions, FINAL or PROVISIONAL)
 python -m labs.matrix               # the four remediation matrices (M3); --evidence docs/evidence writes fNN-matrix.txt
 pytest tests/findings -v            # the same scenarios as tests, plus the isolation proof
 ```

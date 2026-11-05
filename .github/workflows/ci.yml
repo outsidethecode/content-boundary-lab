@@ -1,0 +1,42 @@
+# Written for M5 and not pushed: nothing here has run on GitHub. tests/guards/test_workflow.py holds what this file may do.
+#
+# One job, on macOS arm64, because requirements.lock is verified for CPython 3.13 on macOS arm64 only (its first lines say so);
+# a Linux job would fail the hash check until a Linux lock has been made and verified. Actions are pinned to full commit SHAs
+# of the actions organisation's own repositories (resolved 2026-11-05 with `git ls-remote`, releases older than 14 days).
+name: tests
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  tests:
+    runs-on: macos-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: "3.13"
+      - name: Install the locked environment
+        run: |
+          python -m venv "$RUNNER_TEMP/venv"
+          "$RUNNER_TEMP/venv/bin/python" -m pip install --require-hashes --only-binary=:all: -r requirements.lock
+          "$RUNNER_TEMP/venv/bin/python" -m pip install --no-deps -e .
+      - name: Run the checks
+        run: |
+          PY="$RUNNER_TEMP/venv/bin/python"
+          "$PY" -m pytest -q -W error
+          "$PY" -m pytest -q -m clean_env
+          "$PY" -m pytest -q -m real_server
+          "$PY" -m pytest -q -m packaging
+          "$PY" -m labs
+          "$PY" -m labs.matrix
+          "$PY" tools/check_docs.py
+          "$PY" -m pip check

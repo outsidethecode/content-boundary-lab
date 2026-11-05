@@ -77,6 +77,7 @@ size of the quarantined file and never hashes the bytes. N2 hashes the file and 
 copies it in a second. Every row that changes the quarantined object writes to it directly, which is the finding's assumed
 capability. Verbatim from [docs/evidence/f04-matrix.txt](../evidence/f04-matrix.txt).
 
+<!-- evidence: docs/evidence/f04-matrix.txt -->
 ```text
 row  kind        R    V    N1   N2   what
 L1   legitimate  yes  yes  yes  yes  the accepted bytes are promoted, and the asset served is exactly them
@@ -111,6 +112,7 @@ refused in every variant: they are the baseline, not the finding. The audit asse
 
 Verbatim from [docs/evidence/f04.txt](../evidence/f04.txt) (lines elided with … are in the file).
 
+<!-- evidence: docs/evidence/f04.txt -->
 ```text
 == REFERENCE
   2. baseline: the vendor tries to upload version 2 through the API after the seal
@@ -152,4 +154,7 @@ RESULT     seeded variant exploited: YES   reference blocked: YES
 - The swap here keeps the length so that a size check alone could not see it. Substitutions of other lengths are not part of
   this finding; the remediation matrix above covers a shorter and a longer one (X2, X3), a link, a deleted file and a change
   between two reads.
+- The "hostile" bytes are a file that carries the lab's marker, a made-up string that the lab's synthetic scanner looks for.
+  Nothing here shows, or claims, protection against real malware: the finding is about whether promotion publishes the bytes
+  that were accepted, whatever those bytes are.
 - Everything is synthetic: made-up identities and bytes, the lab marker, no network.

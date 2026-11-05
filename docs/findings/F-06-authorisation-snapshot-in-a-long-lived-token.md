@@ -91,6 +91,7 @@ one microsecond after); the T rows damage the token in the ways M0 lists (algori
 audience, expired, not yet valid, a spoofed identity header). Verbatim from
 [docs/evidence/f06-matrix.txt](../evidence/f06-matrix.txt).
 
+<!-- evidence: docs/evidence/f06-matrix.txt -->
 ```text
 row  kind        R    V    N1   N2   what
 L4   legitimate  yes  NO   NO   yes  authorisation does not depend on the token's claims: a token with none still works
@@ -122,6 +123,7 @@ is a finding about authorisation and not about the verifier. The audit assertion
 
 Verbatim from [docs/evidence/f06.txt](../evidence/f06.txt) (lines elided with … are in the file).
 
+<!-- evidence: docs/evidence/f06.txt -->
 ```text
 == REFERENCE
   3. the SAME token still verifies, as the same subject

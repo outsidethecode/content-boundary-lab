@@ -1,0 +1,144 @@
+# Publication record (M5)
+
+What the publication step (M0 section 9, M5) asked for, what was done, and what is still open.
+**Nothing has been pushed or published.** The repository's remote was not touched, no release was made, and no setting of
+the hosting service was changed. The state described here is the state after the M5 review of 2026-11-05: the
+implementation is committed locally, and the evidence was regenerated from that commit and committed after it (section 6).
+Section 5 is the register of what is still open before publication, with who resolves each item.
+
+## 1. The deliverables
+
+| M0 deliverable | State | Where |
+|---|---|---|
+| The final README and finding pages | Done. The README follows M0 section 8: purpose, the three questions, a diagram with the finding tags, the findings table with links to the twin, the fix, the tests and the evidence, a quick start with its expected last line, the implemented/simulated/conceptual table, a card per finding, trade-offs and limits. Each finding page quotes its results and its matrix from the evidence files, and the checker verifies that | [README.md](../README.md), [docs/findings/](findings/F-02-object-access-checks-the-parent.md) |
+| A CI workflow, written and not pushed | Done, and it has never run. One job on macOS arm64, because the lock is verified for that platform only. A guard test holds what the file may say | [ci.yml](../.github/workflows/ci.yml), [test_workflow.py](../tests/guards/test_workflow.py) |
+| LICENSE and SECURITY.md | Done, with a licence that is a default awaiting your decision (section 5). SECURITY.md separates "report a bug in the reference" from "this is intentional" | [LICENSE](../LICENSE), [SECURITY.md](../SECURITY.md) |
+| A fresh-clone reproduction on macOS and Linux | macOS done; Linux not done (section 3) | section 3 |
+| A naming and trademark sweep | Done (section 4), with its limits | section 4 |
+| The link and snippet checker (M0 section 7) | Done | [tools/check_docs.py](../tools/check_docs.py), [test_check_docs.py](../tests/test_check_docs.py) |
+| Evidence regenerated from a clean tree (Addendum A11) | Done in two steps. The implementation commit carries evidence marked `PROVISIONAL`, because the commit it describes did not exist when the evidence was made. The commit after it holds the evidence regenerated from the implementation commit: `FINAL`, naming that commit, and changing nothing but the files of `docs/evidence/` (section 6) | [docs/evidence/](evidence/summary.txt) |
+
+## 2. The acceptance criteria
+
+| Criterion | Result |
+|---|---|
+| The link and snippet checker passes | `python tools/check_docs.py` reports no problem. It follows every relative link and anchor, compares the four snippets in the README with their source and the 16 evidence blocks of the README, the walkthrough and the finding pages with their evidence files. `--final` also requires the evidence to be marked `FINAL` and to name a commit in the history whose `src/`, `labs/`, `tests/`, `requirements.lock` and `pyproject.toml` are those of HEAD; that commit need not be HEAD, so evidence can be committed after the commit it describes (section 6) |
+| A cold reader can state the project's purpose and the findings in about 90 seconds | **Not shown.** The part of the README above its quick start (the purpose, the three questions, the diagram and the findings table) is short enough for that, and a test keeps it short, but no person who has not seen the project has read it. That is a measure of length and not of understanding |
+| Nothing is pushed or published without approval | Nothing was pushed or published |
+
+## 3. The fresh-clone reproduction
+
+**macOS arm64, CPython 3.13.7: done.** A clone of the committed project (`b5982c3`) was made, the M5 working tree was laid over it
+and committed in that scratch clone only (the real repository was not touched), and the documented commands were run there, in a
+new virtual environment built by the README's three commands. On 2026-11-05:
+
+- 25 packages were installed by hash, and `pip check` was clean.
+- `python -m labs` ended with the summary line, and `python -m labs.matrix` reported all 15 variant rows as expected.
+- The ordinary suite with `-W error`, the guards, the findings, and the opt-in `clean_env`, `real_server` and `packaging` runs
+  passed. The one failure in the first run was this record's own unfinished placeholders, which a test caught.
+- Evidence regenerated in the clone was `FINAL` and named the scratch commit; `check_docs.py` and `check_docs.py --final`
+  reported no problem; and every regenerated evidence body equalled the body in the working tree (only the date, commit and
+  status lines differ).
+- The block in section 5 of the [walkthrough](walkthrough.md), extracted from the page and run as written, took a delivery from
+  declaration to a download that equalled the upload, with one audit row per decision. A vendor of the other production got
+  the same 403 and the same audit row (`access.denied`, `no_engagement`) for the first production as for one that does not exist.
+
+The scratch snapshot did not contain this section.
+
+**Linux: not done.** Docker is installed on this machine, but it holds other projects' images and no Python image, so a Linux run
+would have meant pulling an image from a registry or borrowing another project's, and neither was authorised. A run would also
+be refused at the hash check: `requirements.lock` holds the hashes of macOS arm64 wheels for the three packages that ship
+compiled code (`cryptography`, `cffi`, `pydantic_core`), so Linux needs its own hash-pinned lock, which is a change to the
+dependency lock and needs your approval of the exact artefacts. The workflow therefore has no Linux job, and no sentence in the
+README, the walkthrough or the lock claims Linux, and nothing here is cross-platform verified. The steps to finish it are
+prepared below and have not been run.
+
+### Linux reproduction steps (prepared, not run)
+
+You need a Linux host you control (x86_64 or aarch64, glibc), CPython 3.13.x with `venv`, `git` and access to PyPI.
+
+**What is expected to fail, and why.** Only three of the 25 locked wheels are platform-specific; their `WHEEL` files in the
+macOS environment say `cffi 2.1.1` is `cp313-cp313-macosx_11_0_arm64`, `cryptography 50.0.2` is
+`cp311-abi3-macosx_11_0_arm64` and `pydantic_core 2.46.4` is `cp313-cp313-macosx_11_0_arm64`. The other 22 are
+`py3-none-any` wheels, whose hashes do not depend on the platform. Each lock entry holds one hash, so on Linux pip would pick
+a Linux wheel of those three, find its hash is not in the lock, and refuse it (`THESE PACKAGES DO NOT MATCH THE HASHES`).
+
+1. Clone the repository, check out the commit under test, and make an environment:
+   `python3.13 -m venv .venv`, then `.venv/bin/python -m pip install --upgrade pip` (26.2 or later; see
+   [static-analysis.md](review/static-analysis.md) TF-12).
+2. Run the documented install, `.venv/bin/python -m pip install --require-hashes --only-binary=:all: -r requirements.lock`.
+   Expected today: refused at the hash check for `cffi`, `cryptography` and `pydantic_core`. That refusal is the check working,
+   and is the evidence that Linux needs its own lock.
+3. Make a candidate lock, which needs your approval before it is used or merged. In an empty directory run
+   `python -m pip download --only-binary=:all: --no-deps -d wheels cffi==2.1.1 cryptography==50.0.2 pydantic_core==2.46.4`,
+   then `python -m pip hash wheels/*.whl`, and compare each digest with the SHA-256 that PyPI publishes for that file name
+   (`https://pypi.org/pypi/<name>/<version>/json`, field `digests.sha256`), as was done for the two packages added at M1M.
+4. Choose one of two shapes, and approve it: a separate file (for example `requirements-linux-x86_64.lock`) made of the 22
+   unchanged entries and the three new hashes, which changes no existing pin; or a second `--hash` on the three entries of
+   `requirements.lock`, which gives one lock for both platforms but changes the lock, its header comment and what
+   `tests/test_environment.py` must accept. Each architecture and C library (manylinux x86_64, manylinux aarch64, musllinux)
+   has different files and hashes, and CPython 3.12 would need `cp312` files of `cffi` and `pydantic_core`.
+5. With an approved lock: install it, `pip install --no-deps -e .`, `pip check`, then run what the macOS run ran:
+   `python -m pytest -q -W error`, `python -m pytest -q -m clean_env`, `-m real_server`, `-m packaging`, `python -m labs`,
+   `python -m labs.matrix` and `python tools/check_docs.py`.
+6. Keep the failures as well as the passes. These differ between macOS and Linux and no run has examined them here: hard
+   links, `O_NOFOLLOW`, `O_DIRECTORY` and inode comparison in the no-clobber placement and the root checks, `flock` between
+   the lab's processes, the length limit of a UNIX-domain socket path (104 bytes on macOS, 108 on Linux) in the tests that
+   use one, case-sensitive file names, the default umask, and the SQLite version.
+7. Only a passing Linux run allows a sentence about Linux in the README and a Linux job in the workflow. Until then neither
+   exists.
+
+## 4. The naming and trademark sweep
+
+- **The name.** A web search for "Content Boundary Lab" found no project, product or company of that name; it found a phrase in
+  an unrelated pull-request review tool's release notes ("third-party content boundary") and unrelated "content lab"
+  organisations. A search of a trademark register was **not** made, and this is not a clearance: if the name matters to you
+  legally, check a register before publishing.
+- **Names of others in the repository.** A search of the tracked files for the names of studios, streaming services, standards
+  programmes and cloud and identity products found only MovieLabs and its CSAP specification (named as the source of an
+  analogy, in the architecture and references), and the open-source dependencies and standards the references list
+  (FastAPI, Starlette, PyJWT, `cryptography`, `uvicorn`, SQLite, OWASP, MITRE CWE). They are named to say what they are. The
+  README, the references and the licence section say the lab is independent and not affiliated with, endorsed by or
+  sponsored by any of them. No logo, wordmark or text of any of them is reproduced.
+- **People and data.** All identities, content and keys in the repository are synthetic. The secret scan of M4 found no
+  private key or credential in the tracked files, the history or the built distributions (it is repeated in section 6).
+- **Quoted standards text.** The documents cite requirement and weakness numbers and paraphrase them in a few words; they do
+  not reproduce the text of OWASP ASVS (CC BY-SA 4.0) or of the MITRE CWE catalogue. The retrieval dates are in
+  [references.md](references.md).
+
+## 5. The register of what is open before publication
+
+None of these is solved by a code change, and none is claimed anywhere as done. "Resolves" is who has to act.
+
+| Item | State today | What the repository says about it | Resolves |
+|---|---|---|---|
+| **Linux reproduction** (M0 required it) | **Outstanding.** Only macOS arm64, CPython 3.13.7, was run. The lock holds macOS arm64 hashes for `cffi`, `cryptography` and `pydantic_core`, so a Linux install by hash is refused | Not cross-platform verified; the README, claims register and threat model say one tested platform. Exact steps and the lock adjustments that may be needed are in section 3 | You: approve a Linux lock (the exact artefacts) and a Linux host, a VM or an image pull |
+| **Licence (D8)** | **Provisional.** `LICENSE` is MIT with the line `Copyright (c) 2026 outsidethecode`, and the documents are said to be CC BY 4.0. A Git author name is a pseudonym and is not proof of who owns the copyright | Default chosen so that the files exist for review; the claims register says the licence, its holder and the name are not confirmed | You: confirm or change the licence and the holder's legal name |
+| **GitHub workflow** | **Written, never executed on GitHub.** Locally, a guard test reads its text (SHA-pinned actions, read-only token, no `pull_request_target`, no event data in a script, the locked install by hash) and every command it runs was run by hand on macOS. Hosted-runner behaviour, the action versions running, and the `macos-` runner image are untested | The README and C-30 say it has not run; local validation is not described as a CI result | You: push when approved, then read the first run |
+| **Private vulnerability reporting** | **Not enabled, not verified.** It is a repository setting | SECURITY.md names it as the way to report. Until it is turned on, that sentence leads nowhere, and no document says the channel works | You: turn it on and send a test report, or change SECURITY.md to another channel |
+| **History (D9)** | **Flagged for privacy review.** The root commit's author address (the only one of the 28 earlier commits that is not the noreply address) is on a company domain, and the repository was reported public on 2026-11-03 | History was not rewritten and nothing in M5 changes it | You: decide whether to leave, to rewrite (which changes every commit hash and breaks the commit references in these documents) or to ask the hosting service to purge |
+| **Human reviewer (D10)** | **D10 is still pending.** No human has read the code or the claims | The three AI reviews in [review/](review/m4-findings.md) are internal checks by the author's own model family; the README, claims register and M4 register say so | You: find a reviewer; [REVIEW-PACKAGE.md](review/REVIEW-PACKAGE.md) is written for one who has not seen the project |
+| **Cold read** | **Not shown.** The part of the README above the quick start is about 310 words and a test keeps it at 360 or fewer, which is compatible with a quick introduction | A measure of length, not of understanding; no one who had not seen the project has read it | A person who has not seen the project, with a clock |
+| **Name check** | **Not a clearance.** A web search found no project of the same name; no trademark register was searched | Section 4 says so | You, if the name matters legally |
+| **Python 3.12** | Not verified, for the same reason as Linux | README: one tested platform | You, with the Linux lock |
+
+Settled in M5 and unchanged: the evidence (section 6), the repeated dependency audit and secret scan (section 6), and
+M4-01, which stays a documented medium-severity limitation that is open ([m4-findings.md](review/m4-findings.md), TM-38).
+
+## 6. What was done for the evidence and the audit, and what comes next
+
+1. **Implementation commit.** The M5 files were committed locally after the review of 2026-11-05. Its evidence is
+   `PROVISIONAL`, which `check_docs.py` reports as a note.
+2. **Evidence commit.** From a clean checkout of that commit, `python -m labs --evidence docs/evidence` and
+   `python -m labs.matrix --evidence docs/evidence` regenerated the nine evidence files. They say `FINAL`, carry the date,
+   command, Python and pins, and name the implementation commit as the tested source revision. They cannot name the evidence
+   commit itself (its hash does not exist until it is made), and `python tools/check_docs.py --final` accepts that: it
+   requires the named commit to be in the history and `src/`, `labs/`, `tests/`, `requirements.lock` and `pyproject.toml` to be
+   those of that commit, not for it to be HEAD. The evidence commit changed only files in `docs/evidence/`.
+3. **The audit, repeated on 2026-11-05** on the same tree as the implementation commit ([static-analysis.md](review/static-analysis.md)
+   section 7): `pip-audit` found no known vulnerability in the 25 locked distributions or the pinned build backend (the
+   `pip` in the test environment has the six advisories already recorded as TF-12), the secret scan found nothing new in 153
+   files or in the 28 commits that existed before the M5 commit (all refs), and the built wheel and source distribution contain no `labs/`, no vulnerable
+   module and no key or database file.
+4. **Next, all yours:** the items of section 5; then push, with your explicit approval of each push. Re-run the audit and the
+   secret scan on the commit that is actually published, because an advisory published after 2026-11-05 is not covered.

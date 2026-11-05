@@ -80,6 +80,7 @@ applications: the reference (R), the seeded variant (V), and a naive fix (N1) th
 identity and adds a check that the cache entry found belongs to that digest. Verbatim from
 [docs/evidence/f03-matrix.txt](../evidence/f03-matrix.txt).
 
+<!-- evidence: docs/evidence/f03-matrix.txt -->
 ```text
 row  kind        R    V    N1   what
 L2   legitimate  yes  yes  yes  the same clean file delivered again is not scanned again: the cache is reused, and the event says so
@@ -105,6 +106,7 @@ must already be in the cache. The audit assertions are in
 
 Verbatim from [docs/evidence/f03.txt](../evidence/f03.txt) (lines elided with … are in the file).
 
+<!-- evidence: docs/evidence/f03.txt -->
 ```text
 == REFERENCE
   3. the vendor seals it

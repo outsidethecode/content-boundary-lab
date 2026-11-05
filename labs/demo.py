@@ -75,25 +75,37 @@ def render(finding, reference: Observed, seeded: Observed) -> tuple[str, bool]:
     return "\n".join(lines) + "\n", exploited and blocked
 
 
-def _commit() -> str:
+def _provenance(root: Path) -> tuple[str, bool]:
+    """The short commit of the checkout at `root`, and whether the tree is exactly that commit.
+
+    Outside a checkout the commit is "unknown" and the tree is not clean. Changes under docs/evidence are ignored: a run
+    writes its own output there, so without this every file after the first would be made from an "unclean" tree.
+    """
     try:
-        root = Path(__file__).resolve().parents[1]
         head = subprocess.run(["git", "rev-parse", "--short", "HEAD"], cwd=root, capture_output=True, text=True, check=True).stdout.strip()
-        dirty = subprocess.run(["git", "status", "--porcelain"], cwd=root, capture_output=True, text=True, check=True).stdout.strip()
-        return f"{head}{' plus an uncommitted working tree' if dirty else ''}"
+        differs = subprocess.run(
+            ["git", "status", "--porcelain", "--", ".", ":(exclude)docs/evidence"], cwd=root, capture_output=True, text=True, check=True
+        ).stdout.strip()
     except (OSError, subprocess.CalledProcessError):
-        return "unknown"
+        return "unknown", False
+    return (f"{head} plus an uncommitted working tree", False) if differs else (head, True)
 
 
-def header(command: str) -> str:
+def header(command: str, root: Path | None = None) -> str:
+    commit, clean = _provenance(root if root is not None else Path(__file__).resolve().parents[1])
+    status = (
+        "FINAL: generated from a clean committed tree (docs/decisions.md, AM-31)"
+        if clean
+        else "PROVISIONAL: the tree was not a clean checkout; regenerate from a clean committed tree (docs/decisions.md, AM-31)"
+    )
     pins = ", ".join(f"{name}=={importlib.metadata.version(name)}" for name in PINNED)
     return (
         f"date     {datetime.now(timezone.utc).strftime('%Y-%m-%dT%H:%M:%SZ')}\n"
         f"command  {command}\n"
-        f"commit   {_commit()}\n"
+        f"commit   {commit}\n"
         f"python   {platform.python_version()} on {platform.system()} {platform.machine()}\n"
         f"pinned   {pins}\n"
-        "status   PROVISIONAL: regenerated against the final committed tree at M5 (docs/decisions.md, AM-28)\n"
+        f"status   {status}\n"
         f"note     {SENTENCE}\n"
         "         Synthetic identities, content and keys only. The scanner is the lab's synthetic marker scanner and provides\n"
         "         no malware protection. A passing run shows the seeded defect is reproducible and the reference blocks it\n"
