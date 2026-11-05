@@ -42,7 +42,7 @@ The lab's scanner detects one synthetic marker. It provides no malware protectio
 
 ## Run the lab locally
 
-For local study only: it listens on `127.0.0.1` and nowhere else, with no TLS, and nothing in it is meant to face a network. Every value the lab trusts is named on the command line or fixed in the runner's code: there is no environment variable and no default, and the runner refuses to start without a loadable key set, a database of the lab's own schema, and two private storage directories. The scanner is the synthetic one, and the start-up banner says so. Install the locked environment first, as under "Run the tests" below, and use that environment's `python`.
+For local study only: it listens on `127.0.0.1` and nowhere else, with no TLS, and nothing in it is meant to face a network. Every value the lab trusts is named on the command line or fixed in the runner's code: there is no environment variable and no default, and the runner refuses to start without a loadable key set, a database of the lab's own schema, and two storage directories that are its own and not writable by anyone else. The scanner is the synthetic one, and the start-up banner says so. Install the locked environment first, as under "Run the tests" below, and use that environment's `python`.
 
 ```bash
 python tools/dev_token_issuer.py setup                       # a throwaway key, the trusted settings and two private directories in .dev/
@@ -52,7 +52,7 @@ python tools/dev_token_issuer.py mint --subject dev-vendor-a       # a token for
 python -m content_boundary_lab.runner serve --settings .dev/settings.toml --database .dev/lab.sqlite3 --trusted-root .dev/trusted --quarantine-root .dev/quarantine --max-upload-bytes 1048576 --port 8000
 ```
 
-`serve` runs `uvicorn` as a library with one worker, no reload and no proxy headers, whatever the environment says. `promote`, `rescan` and `reconcile` are the lab's own jobs, run by the operator, and `reconcile` refuses to start while a server, a promotion or a rescan is running on the same directories. [Architecture](docs/architecture.md) section 14 describes each command and what it does to the lab. A delivery stranded in `SEALING` is listed by `reconcile` and nothing moves it: an operator investigates it (A-J7, a known availability limit).
+`serve` runs `uvicorn` as a library with one worker, no reload and no proxy headers, whatever the server's environment variables say (Python's own, such as `PYTHONPATH`, are the operator's: the tests start the runner with `python -I`). `promote`, `rescan` and `reconcile` are the lab's own jobs, run by the operator, and `reconcile` refuses to start while a server, a promotion or a rescan is running on the same directories. [Architecture](docs/architecture.md) section 14 describes each command and what it does to the lab. A delivery stranded in `SEALING` is listed by `reconcile` and nothing moves it: an operator investigates it (A-J7, a known availability limit).
 
 To see the real server work, run `.venv/bin/python -m pytest -m real_server -s`: it starts `serve` on a random loopback port, speaks HTTP to it with synthetic data, and stops it. It needs `lsof` and is left out of the ordinary run.
 
@@ -70,5 +70,7 @@ python3 -m venv .venv
 The direct runtime dependencies are `fastapi`, `PyJWT`, `cryptography` and `uvicorn` (the minimal install, not its `standard` extra); `cffi` and `pycparser` are installed only because `cryptography` needs them, and `click` only because `uvicorn` does. `PyJWT` and `cryptography` verify the signed tokens (`identity.py`), against public keys from trusted configuration only; nothing in the source tree can mint a token or hold a private key.
 
 The build backend (`setuptools==84.2.1`) is version-pinned in `pyproject.toml` and installed by pip into a temporary build environment. It is not covered by the hashes.
+
+`pip` itself is not in the lock. The one that ships with CPython 3.13.7 (25.2) has six published advisories, the latest fixed in 26.2; the hashes limit what it can install to the 25 locked wheels, but if you want a current installer, run `.venv/bin/python -m pip install --upgrade pip` before the install above (that one step is not covered by the hashes). The dependency audit is in [docs/review/static-analysis.md](docs/review/static-analysis.md).
 
 Ordinary test runs check that the locked packages are installed at the locked versions and tolerate extra packages. To check that a fresh environment holds exactly the locked set, run `.venv/bin/python -m pytest -m clean_env`.

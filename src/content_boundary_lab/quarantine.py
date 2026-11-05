@@ -22,7 +22,7 @@ module's to remove, whatever the database says about its delivery.
 
 Assumptions, stated. The root is a local directory that untrusted users cannot write to, and its parent directories are
 followed like any configured path. A hard link planted by someone who can already write into it is invisible to a
-no-follow open. Nothing here is durable across a power failure: the staged file is flushed before the rename, the
+no-follow open. Nothing here is durable across a power failure: the staged file is flushed before it is linked into place, the
 directory is not, and nothing claims otherwise. A network filesystem is not supported.
 """
 

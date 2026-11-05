@@ -141,6 +141,7 @@ between the URL and the asset's owner (and with it any rule, report or alert key
   production) is not addressed (design decision D4).
 - The lab proves the corrected lookup blocks the cases above under the stated assumptions; it does not prove no other route
   has the same flaw, and the one asset route is the only object read in the lab.
-- The matrix for the fix (every role against every production, and the naive-fix bypass corpus) belongs to M3.
+- The remediation matrix above covers the roles, the productions and the naive-fix bypasses it lists; it is not a proof that
+  no other route has the same flaw.
 - Everything is synthetic: made-up identities and bytes, a key made in memory, no network. Nothing here describes any real
   system.

@@ -67,6 +67,20 @@ def test_two_writers_never_share_a_name(root):
             writer.discard()
 
 
+@pytest.mark.parametrize("kind", OCCUPANTS)
+def test_a_staged_name_that_is_already_taken_is_never_reused(tmp_path, root, monkeypatch, kind):
+    """The names are random, so this cannot happen by chance; it is the exclusive create that makes it fail and not overwrite."""
+    taken = "ef" * 16
+    (root / ".incoming").mkdir()
+    describe = occupy(root / ".incoming" / taken, tmp_path, kind)
+    before = describe()
+    monkeypatch.setattr(quarantine.secrets, "token_hex", lambda nbytes: taken)
+    with pytest.raises(FileExistsError):
+        quarantine.IncomingFile.create(root, 10)
+    assert describe() == before  # whatever was there is exactly as it was
+    assert staged(root) == [taken]  # and nothing else was created
+
+
 @pytest.mark.parametrize(
     "chunks",
     [[b""], [b"a"], [b"x" * 10], [b"x", b"y" * 9], [b"", b"abc", b"", b"def"], [bytes(range(256)) * 3, b"\x00" * 5], [b"z"] * 40],

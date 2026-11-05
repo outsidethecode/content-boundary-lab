@@ -1,6 +1,6 @@
 # Architecture
 
-This describes the reference implementation as it is built through M1K, one section per thing a reviewer needs in order to
+This describes the reference implementation as it is built through M1M (M2 and M3 changed nothing in `src/`), one section per thing a reviewer needs in order to
 read the code: what the pieces are, where each trust decision is made, how a request and a delivery move, what the database
 refuses on its own, and what is simulated. It does not repeat the reasoning behind each choice; that is in
 [decisions.md](decisions.md) (the amendment, AM-n, is cited where a section depends on one). The threats these controls
@@ -8,8 +8,9 @@ answer are in [threat-model.md](threat-model.md), and every claim made about the
 [claims.md](claims.md). Where this file and `decisions.md` differ, `decisions.md` wins.
 
 The lab is an independent educational exercise. The application here is the reference: it contains no deliberately
-vulnerable code and no switch that selects any. The vulnerable variants are a later stage (M2), will live outside `src/`,
-and are not built.
+vulnerable code and no switch that selects any. The four seeded variants live outside `src/`, in [labs/](../labs/README.md);
+each replaces one function of the reference for the length of a `with` block, and none is packaged or reachable from the
+application (the seams are listed below).
 
 ## 1. The three questions
 
@@ -205,7 +206,7 @@ that normally upholds them.
 | Deliveries | deletion or replacement; a change to identity or declared values; a state change that is not one of the twelve arrows |
 | Receipt and seal | a change to either once written; a state after sealing with no seal |
 | Verdicts | any update, delete or replacement |
-| `SCAN_PASSED`, `ACCEPTED` | entry without a `no_detection` verdict bound to the delivery's own sealed digest |
+| `SCAN_PASSED`, `ACCEPTED` | entry without a `no_detection` verdict bound to the delivery's own sealed digest. That is all the database compares: not the declared digest or size, the engine, the expiry or the bytes, and not a later change of `verdict_id` while in the state. Those are the application's (the seal and acceptance re-check them, and promotion re-hashes the bytes); a writer to the database file is outside the design (TM-27) |
 | Acceptance | half a record; a digest other than the sealed one; any change once written |
 | Promotion | a record outside `PROMOTING` and later; a change once written; `PROMOTED` without an asset row naming this delivery, production, accepted digest and size under the reserved key |
 | Assets from a delivery | insertion unless that delivery is `PROMOTING` for exactly these values; later update, deletion or replacement |
@@ -255,7 +256,7 @@ application in both variants.
 | Implemented | token verification; engagement authorisation; the scoped asset read; the delivery workflow from declaration to promotion; the verdict cache and the hash-bound trust gate; the audit trail; the recovery passes (rescan, promotion reconcile) |
 | Simulated | the identity provider (a development token issuer under `tools/`, and an in-memory one under `tests/`); the scanner (one synthetic marker); the object stores (two local directories) |
 | Conceptual | cloud buckets, pre-signed URLs, OIDC federation, CSAP's separate components |
-| Not built | recovery of a delivery stranded in `SEALING` (an operator investigates; A-J7); the optional F-01 and F-05 variants; the fix-evidence matrices and the bypass corpora for the naive fixes (M3) |
+| Not built | recovery of a delivery stranded in `SEALING` (an operator investigates; A-J7); the optional F-01 and F-05 variants; `verify_trusted()` after promotion (TM-24) |
 
 ## 12. CSAP analogy and cloud mapping
 
@@ -314,8 +315,9 @@ outside the package: it makes a throwaway key, the settings that name only its p
 
 **Starting is all or nothing.** Before it takes a lock, prints or binds, a start loads the settings and the key set (a
 missing or unreadable file, a URL, no keys, or private key material ends it), checks the database (a regular file, the
-user's own, closed to group and others, at the lab's schema version with every schema object as expected) and each root (a
-directory and not a link, the user's own, closed to group and others, and the two separate). A refusal says which check
+user's own, not writable by group or others, at the lab's schema version with every schema object as expected) and each root
+(a directory and not a link, the user's own, not writable by group or others, and the two separate). Read access is not
+checked: a root of mode 0755 is accepted, and the dev token issuer makes its directories 0700. A refusal says which check
 failed and repeats nothing a file held, and the disk is as it was. Parent directories are not examined: the trusted
 operator controls where the lab keeps its data.
 

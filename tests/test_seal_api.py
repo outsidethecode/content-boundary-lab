@@ -32,7 +32,7 @@ from support.http_lab import (
     spy,
     transaction_whose_commit_fails,
 )
-from support.scanners import BlockingScanner, CountingScanner, ScriptedScanner, engine_like
+from support.scanners import BlockingScanner, CountingScanner, ScriptedScanner, UpgradingScanner, engine_like
 
 from content_boundary_lab import audit, quarantine, request_flow, store, trust
 from content_boundary_lab.clock import to_micros
@@ -378,6 +378,19 @@ def test_the_signature_is_read_from_the_content_and_not_from_what_the_vendor_sai
 # --- the verdict cache -----------------------------------------------------------------------------------------------------
 
 
+def test_a_verdict_made_in_one_production_is_reused_in_another_and_the_response_says_when_it_was_made(rig):
+    """A limitation, recorded as TM-34: the cache is keyed on content and engine and not on the production (M0), so the
+    second production's vendor learns that identical bytes were scanned elsewhere, and when, without any timing."""
+    lab, scanner = rig.lab, rig.scanner
+    first, second = lab.delivered(CLEAN_FILE), lab.delivered(CLEAN_FILE, "vendor-2", lab.bravo)
+    assert lab.seal(first).status_code == 200
+    lab.clock.moment = T0 + timedelta(hours=1)
+    later = tokens.NOW + 3600
+    response = lab.seal(second, None, lab.bravo, token=lab.token("vendor-2", iat=later, nbf=later, exp=later + 300))
+    assert response.status_code == 200 and scanner.calls == 1
+    assert response.json()["verdict_valid_until"] == utc(T0 + VALID_FOR)  # the first production's scan, not this one's hour
+
+
 def test_a_valid_unexpired_no_detection_verdict_for_the_same_digest_and_scanner_is_reused_without_a_scan(rig):
     lab, scanner = rig.lab, rig.scanner
     first, second = lab.delivered(CLEAN_FILE), lab.delivered(CLEAN_FILE)
@@ -520,6 +533,18 @@ def test_a_malformed_reply_is_a_bad_response_and_is_never_a_verdict(make_lab, re
     response = lab.seal(delivery)
     assert response.status_code == 502 and response.json()["reason"] == "bad_response"
     assert lab.delivery_row(delivery)["state"] == "SCAN_FAILED" and lab.verdict_rows() == []
+
+
+def test_a_verdict_is_never_recorded_under_an_engine_other_than_the_one_that_began_the_scan(make_lab):
+    """A scanner upgraded while it scans: which engine made the verdict is not known, so it is not a verdict at all."""
+    scanner = UpgradingScanner(engine_like(version="2"))
+    lab = make_lab("upgrade", scanner)
+    delivery = lab.delivered(CLEAN_FILE)
+    response = lab.seal(delivery)
+    assert response.status_code == 502 and response.json()["reason"] == "bad_response"
+    row = lab.delivery_row(delivery)
+    assert row["state"] == "SCAN_FAILED" and row["verdict_id"] is None and lab.verdict_rows() == []
+    assert scanner.calls == 1
 
 
 def test_a_scanner_that_reports_the_digest_of_other_bytes_fails_closed_even_with_a_no_detection_verdict(make_lab):

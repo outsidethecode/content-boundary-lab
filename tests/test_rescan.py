@@ -15,7 +15,7 @@ from types import SimpleNamespace
 
 import pytest
 from support.http_lab import CLEAN_FILE, T0, THREAD_WAIT, Background, make_lab, sha256_hex
-from support.scanners import BlockingScanner, CountingScanner, ScriptedScanner, engine_like
+from support.scanners import BlockingScanner, CountingScanner, ScriptedScanner, UpgradingScanner, engine_like
 
 from content_boundary_lab import audit, request_flow, store, trust
 from content_boundary_lab.audit import Actor, AuditAction, AuditReason, Outcome
@@ -57,6 +57,14 @@ def rig(make_lab):
 
 
 # --- recovering from a failed scan ---------------------------------------------------------------------------------------
+
+
+def test_a_rescan_never_records_a_verdict_under_an_engine_other_than_the_one_that_began_the_scan(make_lab):
+    lab, delivery = failed_scan(make_lab)
+    upgrading = UpgradingScanner(engine_like(version="2"))
+    result = rescan(lab, delivery, upgrading)
+    assert result == trust.RescanResult(delivery, "SCAN_FAILED", "bad_response")
+    assert lab.delivery_row(delivery)["verdict_id"] is None and lab.verdict_rows() == []
 
 
 def test_a_failed_scan_is_rescanned_for_the_same_bytes_and_can_then_be_accepted(make_lab):

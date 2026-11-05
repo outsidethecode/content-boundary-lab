@@ -22,7 +22,7 @@ the cache up with the checksum the vendor declared.
 
 **Attacker capability.** A vendor with an engagement in a production, who can declare and upload a delivery. It needs one
 clean file whose verdict is already cached (any file that was delivered and scanned in the ordinary way) and knows that file's
-SHA-256. It forges nothing and breaks no signature.
+SHA-256. ("Clean" here, and in the rest of this page, means only that the lab's synthetic scanner found no marker in it.) It forges nothing and breaks no signature.
 
 **Impact.** Content that was never scanned reaches `SCAN_PASSED` and is eligible for a coordinator's acceptance. **Not
 claimed:** that it reaches the trusted store. The reference promotion copies and hashes the bytes against the digest the
@@ -142,6 +142,7 @@ measured while the bytes arrived) disagrees with the sealed identity only in the
 - Caching `no_detection` verdicts is itself a trade-off, because signatures update. The reference reuses a verdict only for
   exactly the same scanner, version and policy, and only until the verdict's own expiry; re-scanning at promotion is not done
   (a documented gap, [threat-model.md](../threat-model.md) TM-25).
-- The lab shows this one declared-checksum path. The matrix for the fix (checksum, size, media type, signature and cache
-  combinations, and a naive-fix corpus) belongs to M3.
+- The lab shows this one declared-checksum path. The remediation matrix above covers the combinations it lists (checksum,
+  size, an expired verdict and a signature off the allowlist) and one naive fix; it does not cover the declared media type
+  or every other use of a declared value.
 - Everything is synthetic: made-up identities and bytes, no network.

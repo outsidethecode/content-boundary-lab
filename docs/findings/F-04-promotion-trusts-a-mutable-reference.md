@@ -150,5 +150,6 @@ RESULT     seeded variant exploited: YES   reference blocked: YES
 - Atomic publication assumes POSIX semantics on one filesystem; the lab was run on macOS only and makes no durability claim
   (open V8). Version pinning in a cloud store is conceptual only.
 - The swap here keeps the length so that a size check alone could not see it. Substitutions of other lengths are not part of
-  this finding and no test covers them; the M3 matrix for the fix will.
+  this finding; the remediation matrix above covers a shorter and a longer one (X2, X3), a link, a deleted file and a change
+  between two reads.
 - Everything is synthetic: made-up identities and bytes, the lab marker, no network.

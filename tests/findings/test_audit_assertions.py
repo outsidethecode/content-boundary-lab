@@ -8,6 +8,7 @@ the lab's marker, a raw request value or an internal error. All reference behavi
 """
 
 import json
+import sqlite3
 from datetime import timedelta
 
 import pytest
@@ -184,7 +185,7 @@ def test_a_promotion_whose_publication_cannot_be_audited_publishes_nothing_and_s
     started = promotion.begin(world.production["alpha"], delivery, clock=world.clock, database_path=world.database)
     written = promotion.stage(started, quarantine_root=world.quarantine, asset_root=world.trusted)
     world.break_audit()  # the intent was recorded; the publication cannot be
-    with pytest.raises(Exception):
+    with pytest.raises(sqlite3.OperationalError, match="database or disk is full"):  # the audit insert's own failure, not another
         promotion.publish(started, written, clock=world.clock, database_path=world.database, asset_root=world.trusted)
     assert world.delivery_row(delivery)["state"] == "PROMOTING"
     assert world.rows("SELECT COUNT(*) AS n FROM assets WHERE delivery_id = ?", delivery)[0]["n"] == 0

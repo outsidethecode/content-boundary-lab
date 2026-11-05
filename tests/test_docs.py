@@ -30,8 +30,9 @@ ROOT = Path(__file__).resolve().parents[1]
 FINDING_PAGES = sorted((ROOT / "docs" / "findings").glob("F-*.md"))  # M2: one page per seeded finding
 EVIDENCE = sorted((ROOT / "docs" / "evidence").glob("f??.txt"))  # one run of a scenario against both variants
 MATRIX_EVIDENCE = sorted((ROOT / "docs" / "evidence").glob("f??-matrix.txt"))  # M3: one remediation matrix
+REVIEW_PAGES = sorted((ROOT / "docs" / "review").glob("*.md"))  # M4: the review package, the scan report, the audit, the register
 LABS_README = ROOT / "labs" / "README.md"
-DOCS = [ROOT / "docs" / name for name in ("architecture.md", "threat-model.md", "references.md", "claims.md")] + FINDING_PAGES
+DOCS = [ROOT / "docs" / name for name in ("architecture.md", "threat-model.md", "references.md", "claims.md")] + FINDING_PAGES + REVIEW_PAGES
 README = ROOT / "README.md"
 PAGES = [README, LABS_README, *DOCS]
 THREAT_MODEL = ROOT / "docs" / "threat-model.md"
@@ -308,7 +309,64 @@ def test_the_labs_readme_lists_exactly_the_labs_that_exist_each_with_its_write_u
     assert "intentionally vulnerable code. The default application does not." in text(LABS_README)
 
 
-# --- the vocabulary ------------------------------------------------------------------------------------------------------------
+# --- the M4 review documents ---------------------------------------------------------------------------------------------------
+
+REVIEW_DIR = ROOT / "docs" / "review"
+CLAIM_CLASSES = {"Demonstrated", "Supported, subject to an assumption", "Not yet demonstrated", "Out of scope"}
+SEVERITIES = {"High", "Medium", "Low", "Informational"}
+TRIAGE = ("Fixed", "Accepted", "Documented")  # M0 M4: every review item is fixed, accepted with a rationale, or documented
+AFFECTS = {"reference", "labs", "packaging", "tests", "docs"}
+
+
+def test_the_review_folder_holds_the_package_the_review_the_scans_the_audit_and_the_register():
+    names = sorted(page.name for page in REVIEW_PAGES)
+    assert names == ["REVIEW-PACKAGE.md", "claims-audit.md", "fresh-context-review.md", "m4-findings.md", "static-analysis.md"]
+
+
+def test_the_claims_audit_classifies_every_claim_of_the_register_exactly_once():
+    section = text(REVIEW_DIR / "claims-audit.md").split("## 1. Classification")[1].split("## 2.")[0]
+    classified: dict[str, list[str]] = {}
+    for line in section.splitlines():
+        if line.startswith("| C-"):
+            cells = [cell.strip() for cell in line.strip().strip("|").split("|")]
+            assert len(cells) == 4, line[:40]
+            classified.setdefault(cells[0], []).append(cells[1])
+    claims = [row[0] for row in rows(CLAIMS, "C-")]
+    assert sorted(classified) == sorted(claims)
+    assert all(len(found) == 1 and found[0] in CLAIM_CLASSES for found in classified.values())
+
+
+def test_every_finding_of_the_register_is_numbered_in_order_and_triaged_with_all_its_fields():
+    register = REVIEW_DIR / "m4-findings.md"
+    found = rows(register, "M4-")
+    assert [row[0] for row in found] == [f"M4-{number:02d}" for number in range(1, len(found) + 1)] and len(found) >= 30
+    problems = []
+    for row in found:
+        if len(row) != 7:
+            problems.append(f"{row[0]}: {len(row)} cells")
+            continue
+        identifier, impact, where, evidence, affects, remediation, status = row
+        if not re.match(r"\**(High|Medium|Low|Informational)\b", impact):
+            problems.append(f"{identifier}: no severity")
+        if not status.startswith(TRIAGE):
+            problems.append(f"{identifier}: not triaged ({status!r})")
+        if not all(len(cell) >= 5 for cell in (impact, where, evidence, remediation)):
+            problems.append(f"{identifier}: an empty field")
+        if not {part.strip().split(" ")[0] for part in affects.split(",")} <= AFFECTS:
+            problems.append(f"{identifier}: affects {affects!r}")
+        problems += [f"{identifier}: {name} does not exist" for name in missing(cited(evidence))]
+    assert problems == []
+
+
+def test_every_register_entry_the_other_review_documents_cite_exists():
+    register = {row[0] for row in rows(REVIEW_DIR / "m4-findings.md", "M4-")}
+    cited_ids = set()
+    for page in REVIEW_PAGES:
+        cited_ids |= set(re.findall(r"M4-\d\d", text(page)))
+    assert cited_ids - register == set()
+
+
+# --- the vocabulary------------------------------------------------------------------------------------------------------------
 
 
 @pytest.mark.parametrize("page", PAGES, ids=lambda page: page.name)

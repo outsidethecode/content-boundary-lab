@@ -172,7 +172,7 @@ BAD_FIELDS = {
     "display name with a tab": ("display_name", "tab\there"),
     "display name with a NUL": ("display_name", "nul\x00byte"),
     "display name with a newline": ("display_name", "line\nbreak"),
-    "display name with a bidirectional override": ("display_name", "gnp.‮mov"),
+    "display name with a bidirectional override": ("display_name", "gnp.\N{RIGHT-TO-LEFT OVERRIDE}mov"),
     "display name that is a number": ("display_name", 5),
     "display name that is null": ("display_name", None),
     "display name that is a list": ("display_name", ["a"]),

@@ -577,7 +577,8 @@ class RevocationStatus(StrEnum):
 
 @dataclass(frozen=True)
 class Revocation:
-    """revoked_at is in microseconds: the original time for ALREADY_REVOKED, and None only for NOT_FOUND."""
+    """revoked_at is in microseconds: the time stored for REVOKED (never earlier than the engagement's creation), the
+    original time for ALREADY_REVOKED, and None only for NOT_FOUND."""
 
     status: RevocationStatus
     revoked_at: int | None
@@ -596,11 +597,18 @@ def _check_id(name: str, value: object) -> None:
 def revoke_engagement_in_production(
     conn: sqlite3.Connection, production_id: str, engagement_id: str, now_micros: int
 ) -> Revocation:
-    """Revoke one engagement of one production, at the instant the caller supplies.
+    """Revoke one engagement of one production, at the instant the caller supplies or the engagement's creation instant,
+    whichever is later.
 
     The production is part of the UPDATE that mutates, so an engagement of another production is never reached: its id
     under this production's id gives NOT_FOUND, exactly as an id that does not exist does, and nothing changes. An
     engagement already revoked here is left as it is and reported with its original time.
+
+    The schema does not allow a revocation before the engagement was created (`revoked_at >= created_at`). If the
+    caller's clock reads earlier than `created_at` (a clock that stepped back), the stored time is `created_at`, so the
+    revocation is applied and not refused; the time returned is the time stored. Nothing else is adjusted: the audit
+    event the caller appends still carries the clock's own reading, and from the commit the engagement is revoked
+    whatever time is stored, because authorisation asks only whether `revoked_at` is set (M4-20).
 
     The caller owns the transaction (use store.transaction(), and authorise the caller for this production in the same
     one): this function never commits or rolls back, reads no clock, and raises StoreError outside a transaction.
@@ -612,12 +620,13 @@ def revoke_engagement_in_production(
         raise TypeError("now_micros must be an int (a bool is not accepted)")
     if not conn.in_transaction:
         raise StoreError("a revocation must run inside the caller's transaction")
-    cursor = conn.execute(
-        "UPDATE engagements SET revoked_at = ? WHERE id = ? AND production_id = ? AND revoked_at IS NULL",
+    stored = conn.execute(
+        "UPDATE engagements SET revoked_at = MAX(?, created_at) "
+        "WHERE id = ? AND production_id = ? AND revoked_at IS NULL RETURNING revoked_at",
         (now_micros, engagement_id, production_id),
-    )
-    if cursor.rowcount == 1:
-        return Revocation(RevocationStatus.REVOKED, now_micros)
+    ).fetchall()
+    if len(stored) == 1:
+        return Revocation(RevocationStatus.REVOKED, stored[0][0])
     row = conn.execute(
         "SELECT revoked_at FROM engagements WHERE id = ? AND production_id = ?", (engagement_id, production_id)
     ).fetchone()

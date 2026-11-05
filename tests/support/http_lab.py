@@ -13,6 +13,8 @@ import inspect
 import os
 import sqlite3
 import stat
+import subprocess
+import sys
 import threading
 from contextlib import contextmanager
 from datetime import datetime, timedelta, timezone
@@ -136,6 +138,12 @@ def occupy(entry: Path, outside: Path, kind: str):
         entry.mkdir()
     elif kind == "a named pipe":
         os.mkfifo(entry)
+    elif kind == "a UNIX-domain socket":  # not in OCCUPANTS: only the tests that name it want one
+        # No test may import socket (tests/guards/test_runner_scope.py: nothing a test does listens or connects), and an
+        # unprivileged os.mknod cannot make one. A child interpreter binds the name, from its own directory because a
+        # socket's path is limited to about a hundred bytes, and exits; the file stays. Nothing listens or connects.
+        bind = "import socket, sys; socket.socket(socket.AF_UNIX).bind(sys.argv[1])"
+        subprocess.run([sys.executable, "-I", "-c", bind, entry.name], cwd=entry.parent, check=True, timeout=30)
     else:
         raise ValueError(kind)
 

@@ -555,8 +555,9 @@ def reconcile(clock: Clock, database_path: Path, quarantine_root: Path, *, min_a
     outside, `min_age` is only an age threshold on the staged file's last write and not proof that its upload is
     inactive, and running this during an active upload can interrupt that upload (its staged file is removed from under
     it and it fails with a generic 500, the delivery still awaiting content). It must not be scheduled or called
-    automatically under the current contract; M1M must establish an active-upload exclusion mechanism before any
-    automated reconciliation is allowed. tests/test_quarantine_reconcile.py shows the interaction as it is observed.
+    automatically under the current contract. The runner's `reconcile` command takes an exclusive lock on the quarantine
+    root and refuses to start while a server, a promotion or a rescan holds it (`quarantine.hold`), but that is advisory and
+    reconcile is still not to be scheduled. tests/test_quarantine_reconcile.py shows the interaction as it is observed.
 
     It removes only staged files at least `min_age` old (the server's own scratch space). It deletes no file at a storage
     key: one whose delivery is UPLOADED or later is the delivery's bytes; one whose delivery is INITIATED is reported as

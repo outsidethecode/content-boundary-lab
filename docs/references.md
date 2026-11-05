@@ -74,7 +74,9 @@ two added on 2026-11-04 (M1M) were taken at the exact versions the security revi
 metadata lookup; their wheels were downloaded into a new empty directory and each SHA-256 was compared with the digest PyPI
 publishes for it (both matched) before it was written to the lock; a fresh environment was then built from the lock with
 `--require-hashes --only-binary=:all:` (pip checks every hash again) and `pip check` was clean.
-Dependency vulnerability scanning is planned for a later stage (M4) and has not been run.
+Dependency vulnerability scanning ran at M4 on 2026-11-04 (pip-audit 2.10.1): no known vulnerability in the 25 locked
+distributions or in the pinned build backend; the details, and six advisories in the `pip` that ships with the test
+environment (which is not in the lock), are in [review/static-analysis.md](review/static-analysis.md). It is repeated at M5.
 
 ## 4. Open reference items
 

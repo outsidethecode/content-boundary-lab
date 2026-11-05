@@ -97,6 +97,18 @@ def test_no_route_answers_anything_but_the_same_401_without_a_verified_token_and
             assert (event["actor_issuer"], event["actor_subject"], event["production_id"], event["object_id"]) == (None, None, None, None), where
 
 
+def test_a_path_that_differs_from_a_route_only_by_a_trailing_slash_is_not_redirected_to_a_host_the_client_names(rig):
+    """The router would answer a 307 before any token is looked at, and build its Location from the client's Host header."""
+    lab, delivery = rig
+    for method, template in served(lab):
+        path = concrete(lab, template, delivery) + "/"
+        for headers in ({}, {"Host": "evil.example"}, {"Authorization": f"Bearer {lab.token('coordinator-1')}", "Host": "evil.example"}):
+            response = lab.client.request(method, path, headers=headers, content=b"{}" if method != "GET" else None, follow_redirects=False)
+            where = f"{method} {template} with {sorted(headers)}"
+            assert response.status_code not in (301, 302, 303, 307, 308), where
+            assert "location" not in response.headers, where
+
+
 def test_the_same_requests_with_a_verified_token_are_not_answered_with_a_401(rig):
     """The control: the 401s above come from the missing credentials, not from something else on the route."""
     lab, delivery = rig

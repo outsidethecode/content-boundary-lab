@@ -331,22 +331,53 @@ def test_the_caller_can_roll_the_revocation_back(world):
     assert world.rows() == before
 
 
+def refuse_updates_of(world: World, subject: str) -> None:
+    """Make any UPDATE of this engagement fail inside SQLite (a trigger made on a plain connection; the ids are hexadecimal).
+
+    Until M4-20 an instant earlier than `created_at` was the way to make this function's statement fail, through the
+    schema's CHECK; the function now stores `created_at` instead, so a failing statement has to be made another way.
+    """
+    raw = sqlite3.connect(world.path, isolation_level=None)  # not store.connect: it would refuse the altered schema
+    try:
+        raw.execute(
+            f"CREATE TRIGGER refuse_the_update BEFORE UPDATE ON engagements WHEN NEW.id = '{world.e[subject]}' "
+            "BEGIN SELECT RAISE(ABORT, 'refused'); END"
+        )
+    finally:
+        raw.close()
+
+
 def test_an_error_leaves_no_partial_mutation(world):
     before = world.rows()
-    too_early = to_micros(SEEDED_AT) - 1  # earlier than created_at: the schema's CHECK refuses it
-    with pytest.raises(sqlite3.IntegrityError):
+    refuse_updates_of(world, "other-a")
+    with pytest.raises(sqlite3.IntegrityError, match="refused"):
         with store.transaction(world.conn):
             assert store.revoke_engagement_in_production(world.conn, world.alpha, world.e["vendor-a"], NOW).status == "revoked"
-            store.revoke_engagement_in_production(world.conn, world.alpha, world.e["other-a"], too_early)
+            store.revoke_engagement_in_production(world.conn, world.alpha, world.e["other-a"], NOW)
     assert world.rows() == before  # the first revocation went with the failed transaction
 
 
 def test_a_failing_statement_changes_nothing_even_before_the_caller_rolls_back(world):
-    too_early = to_micros(SEEDED_AT) - 1
+    refuse_updates_of(world, "vendor-a")
     with store.transaction(world.conn):
-        with pytest.raises(sqlite3.IntegrityError):
-            store.revoke_engagement_in_production(world.conn, world.alpha, world.e["vendor-a"], too_early)
+        with pytest.raises(sqlite3.IntegrityError, match="refused"):
+            store.revoke_engagement_in_production(world.conn, world.alpha, world.e["vendor-a"], NOW)
         assert world.revoked_at("vendor-a") is None
+
+
+def test_an_instant_before_the_creation_is_stored_as_the_creation_instant(world):
+    created = to_micros(SEEDED_AT)
+    result = revoke(world, world.alpha, world.e["vendor-a"], created - 1)  # a clock that stepped back
+    assert (result.status, result.revoked_at) == (store.RevocationStatus.REVOKED, created)
+    assert world.revoked_at("vendor-a") == created
+
+
+@pytest.mark.parametrize("offset", [0, 1, 3_600_000_000], ids=["at creation", "one microsecond after", "an hour after"])
+def test_the_creation_instant_and_every_later_instant_are_stored_as_given(world, offset):
+    created = to_micros(SEEDED_AT)
+    result = revoke(world, world.alpha, world.e["vendor-a"], created + offset)
+    assert (result.status, result.revoked_at) == (store.RevocationStatus.REVOKED, created + offset)
+    assert world.revoked_at("vendor-a") == created + offset
 
 
 def test_a_zero_row_update_that_leaves_an_unrevoked_row_is_an_error_not_a_repeat(tmp_path):

@@ -30,7 +30,7 @@ from support.http_lab import (
     sha256_hex,
     transaction_whose_commit_fails,
 )
-from support.scanners import CountingScanner
+from support.scanners import CountingScanner, SignatureUpdateScanner
 
 from content_boundary_lab import assets, audit, promotion, quarantine, store, trust
 from content_boundary_lab.audit import AuditReason
@@ -387,7 +387,57 @@ def storage_changes(lab, delivery, how):
         occupy(path, outside, how)
 
 
-STORAGE = ["missing", "a symlink to a copy with the same bytes", "a dangling symlink", "a directory", "a named pipe"]
+STORAGE = [
+    "missing", "a symlink to a copy with the same bytes", "a dangling symlink", "a directory", "a named pipe", "a UNIX-domain socket",
+]  # fmt: skip
+
+
+def test_revoking_the_vendor_after_acceptance_does_not_stop_a_promotion(rig):
+    """M4-01 situation 1, a limitation recorded as TM-38: promotion reads no engagement (M0 A9 stops acceptance only)."""
+    lab = rig.lab
+    delivery = lab.accepted(CLEAN_FILE)
+    lab.revoke("vendor")
+    assert promote(lab, delivery).state == "PROMOTED"
+
+
+def test_a_digest_detected_after_acceptance_is_still_promoted_because_promotion_checks_the_accepted_bytes_not_current_evidence(
+    make_lab,
+):
+    """M4-01 situation 3, a limitation recorded as TM-38. It characterises what the code does today; it is not a control.
+
+    Delivery 1 is accepted for H on a clean verdict from engine version 1. Engine version 2 then detects H when the same
+    bytes are sealed as delivery 2, which is rejected. The detection is recorded against delivery 2, nothing withdraws the
+    acceptance of delivery 1, and promoting delivery 1 publishes exactly the accepted bytes: promotion asks whether the
+    bytes still are the accepted bytes (M0 section 5.4) and whether the verdict attached to the delivery is a
+    `no_detection` verdict for H, not whether any engine has since said otherwise (Addendum section 5.2: validity "is
+    re-checked at acceptance but not at promotion").
+    """
+    scanner = SignatureUpdateScanner()
+    lab = make_lab("later", scanner)
+    first = lab.accepted(CLEAN_FILE)
+    (clean,) = lab.verdict_rows()
+    assert (clean["engine_version"], clean["verdict"], clean["sha256"]) == ("1", "no_detection", HASH)
+    assert lab.delivery_row(first)["state"] == "ACCEPTED" and lab.delivery_row(first)["verdict_id"] == clean["id"]
+
+    scanner.learn(HASH)  # engine version 2 detects H
+    second = lab.delivered(CLEAN_FILE)  # the same bytes, delivered again
+    sealed = lab.seal(second)
+    assert (sealed.status_code, sealed.json()["reason"]) == (422, "detection")
+    detected = [row for row in lab.verdict_rows() if row["verdict"] == "detection"]
+    assert [(row["engine_version"], row["sha256"], row["delivery_id"]) for row in detected] == [("2", HASH, second)]
+    assert lab.delivery_row(second)["state"] == "REJECTED"
+
+    assert lab.delivery_row(first)["state"] == "ACCEPTED"  # nothing touched delivery 1 ...
+    assert lab.delivery_row(first)["verdict_id"] == clean["id"]
+    assert all(row["object_id"] != first for row in lab.audit_rows() if row["reason"] == "detection")
+    with pytest.raises(trust.RescanRefused) as refused:  # ... and no operation of the lab can: an accepted delivery is not rescanned
+        trust.rescan(first, clock=lab.clock, database_path=lab.path, quarantine_root=lab.quarantine_root, scanner=scanner)
+    assert refused.value.reason is AuditReason.STATE_CONFLICT
+
+    promoted = promote(lab, first)  # the accepted bytes are still the accepted bytes, so they are published and served
+    assert (promoted.state, lab.delivery_row(first)["state"]) == ("PROMOTED", "PROMOTED")
+    assert lab.download(promoted.asset_id).content == CLEAN_FILE
+    assert [row["sha256"] for row in lab.verdict_rows() if row["verdict"] == "detection"] == [HASH]  # still on record, still unused
 
 
 @pytest.mark.parametrize("how", STORAGE)

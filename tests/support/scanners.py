@@ -4,10 +4,11 @@ They live in tests/support/ only: the shipped scanner is the one synthetic-marke
 no default, so every application a test builds is given one of these or the real stub explicitly.
 """
 
+import hashlib
 import threading
 from dataclasses import replace
 
-from content_boundary_lab.scanner import EngineIdentity, LabSyntheticMarkerScanner
+from content_boundary_lab.scanner import EngineIdentity, LabSyntheticMarkerScanner, ScanResult, Verdict
 
 
 def engine_like(base=None, **changes) -> EngineIdentity:
@@ -62,6 +63,49 @@ class ScriptedScanner(CountingScanner):
         reply = step(stream)
         self.results.append(reply)
         return reply
+
+
+class UpgradingScanner(CountingScanner):
+    """A scanner whose engine becomes `after` as soon as a scan has been made: an upgrade that lands in the middle of a seal.
+
+    The verdict it returns was made by the engine it had when the scan began. Nothing may record it under the other one.
+    """
+
+    def __init__(self, after: EngineIdentity, inner=None) -> None:
+        super().__init__(inner)
+        self.before, self.after = self.engine, after
+
+    def scan(self, stream, *, timeout_seconds):
+        result = super().scan(stream, timeout_seconds=timeout_seconds)
+        self.engine = self.after
+        return result
+
+
+class SignatureUpdateScanner(CountingScanner):
+    """Reports `no_detection` for everything until `learn(digest)`: a newer engine version that detects that digest.
+
+    The shipped scanner has one engine version and looks for one marker, so a later detection of bytes it once passed needs
+    a stand-in. This one reads the whole stream, hashes it and answers for the digest it read (`scanned_sha256`), as the
+    contract requires. It is for the M4-01 characterisation only (docs/review/m4-findings.md).
+    """
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.hostile: set[str] = set()
+
+    def learn(self, digest: str) -> None:
+        self.hostile.add(digest)
+        self.engine = engine_like(self.engine, version=str(int(self.engine.version) + 1))
+
+    def scan(self, stream, *, timeout_seconds):
+        self.calls += 1
+        digest = hashlib.sha256()
+        while block := stream.read(64 * 1024):
+            digest.update(block)
+        found = digest.hexdigest()
+        result = ScanResult(Verdict.DETECTION if found in self.hostile else Verdict.NO_DETECTION, found)
+        self.results.append(result)
+        return result
 
 
 class BlockingScanner(CountingScanner):

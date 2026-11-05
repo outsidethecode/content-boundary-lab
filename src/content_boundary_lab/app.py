@@ -71,7 +71,9 @@ class Dependencies:
 def create_app(deps: Dependencies) -> FastAPI:
     if not isinstance(deps, Dependencies):
         raise TypeError(f"create_app() requires a Dependencies instance, got {type(deps).__name__}")
-    app = FastAPI(debug=False, docs_url=None, redoc_url=None, openapi_url=None)
+    # redirect_slashes is off: the router would otherwise answer a request for `.../engagement/` with a 307 before any token
+    # is looked at, naming the client's own Host header in the Location. A path that is not a route is a plain 404.
+    app = FastAPI(debug=False, docs_url=None, redoc_url=None, openapi_url=None, redirect_slashes=False)
     # The asset route is registered first so that an asset id such as `engagement` is an asset miss (a 404 like any other
     # malformed id) and not read by the engagement route as the end of a production id.
     app.add_api_route(

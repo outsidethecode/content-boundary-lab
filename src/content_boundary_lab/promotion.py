@@ -28,7 +28,9 @@ What the database does and does not say. SQLite and the filesystem are not one t
 are. The asset row, the move to PROMOTED and the audit event commit together or not at all, and the database refuses the
 move unless the asset row names this delivery, production, accepted digest and size; the file is linked inside that
 transaction, and if anything after the link fails the exact file this promotion linked (by device and inode) is taken
-back, and nothing else. A crash can leave a published file under a delivery the database still calls PROMOTING (M0 §5.4:
+back, and nothing else. (A failure in the instant between the link and the note that it was made, such as an error from
+the directory sync or an interrupt, takes nothing back: the staged name is dropped, and reconcile() adopts the file at the
+key only if every byte of it proves to be the accepted bytes.) A crash can leave a published file under a delivery the database still calls PROMOTING (M0 §5.4:
 "Window"): the database is authoritative, an asset is readable only when its row exists, and reconcile() finishes what it
 can prove and reports the rest.
 
@@ -274,7 +276,8 @@ def stage(promoting: Promotion, *, quarantine_root: Path, asset_root: Path) -> a
     except (FileNotFoundError, quarantine.QuarantineStorageError) as error:
         raise ContentChanged("the accepted bytes are not in quarantine as a regular file") from error
     except OSError as error:
-        if error.errno in (errno.ELOOP, errno.ENOTDIR):  # a symlink (O_NOFOLLOW) or something that is not a file
+        # a symlink (O_NOFOLLOW), or something that is not a file: a socket is refused with EOPNOTSUPP on macOS and ENXIO on Linux
+        if error.errno in (errno.ELOOP, errno.ENOTDIR, errno.EOPNOTSUPP, errno.ENXIO):
             raise ContentChanged("the accepted bytes are not in quarantine as a regular file") from error
         raise
     with source:
@@ -407,7 +410,7 @@ def _complete(
         if published:
             try:
                 _take_back(database_path, asset_root, promoting, published[0])
-            except Exception:  # the failure being raised stands; what is left is the attempt's own and reconcile() reports it
+            except Exception:  # the failure being raised stands; what is left is the attempt's own, and reconcile() finishes or reports it
                 logger.error("could not take back a file left by a failed promotion; reconcile() will report it", exc_info=True)
         if link:  # the staged file of a failed publication is this call's own; an adoption's staged name is left as found
             _drop_staging(asset_root, promoting)

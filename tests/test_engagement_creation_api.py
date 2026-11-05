@@ -234,7 +234,7 @@ def test_the_subject_must_already_exist_under_the_callers_issuer(lab, subject):
 
 @pytest.mark.parametrize(
     "subject",
-    ["", " ", "x" * 513, "two\nlines", "nul\x00byte", "‮right-to-left", 5, None, ["outsider-1"]],
+    ["", " ", "x" * 513, "two\nlines", "nul\x00byte", "\N{RIGHT-TO-LEFT OVERRIDE}right-to-left", 5, None, ["outsider-1"]],
     ids=["empty", "space", "too long", "newline", "NUL", "bidi override", "number", "null", "list"],
 )
 def test_a_subject_that_is_not_a_well_formed_string_is_refused_before_any_lookup(lab, subject):

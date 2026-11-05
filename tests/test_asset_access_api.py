@@ -379,8 +379,8 @@ HOSTILE_NAMES = [
     "line\r\nSet-Cookie: pwned=1\r\n\r\n<html>",
     "../../etc/passwd",
     "..\\..\\windows\\system32",
-    "résumé ‮.mov",
-    "evil‮fdp.exe",
+    "résumé \N{RIGHT-TO-LEFT OVERRIDE}.mov",
+    "evil\N{RIGHT-TO-LEFT OVERRIDE}fdp.exe",
     "nul\x00byte",  # SQLite's length() stops at a NUL, so a name may not begin with one, but may contain one
     "tab\there",
     "...hidden",

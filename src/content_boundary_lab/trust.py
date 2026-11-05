@@ -12,7 +12,9 @@ One authoritative digest. H is the SHA-256 of the bytes that are in quarantine a
 those bytes by `content_identity()` and by nothing else (O-1, Option A). The same H is compared with the vendor's declared
 SHA-256, is the scan-cache key, is the digest a verdict is bound to, and is the sealed digest recorded on the delivery;
 acceptance and promotion later compare against it. The declared hash is a claim to be compared with H and is never an
-identity, a key or an argument to the cache (lookup_verdict() takes a ContentIdentity, which a string is not). The intake
+identity, a key or an argument to the cache (lookup_verdict() takes a ContentIdentity, which only names a digest: any 64
+hexadecimal characters can build one, so what keeps a declared hash out is that content_identity() is the one function that
+hashes the stored bytes, and the F-03 seam is that function). The intake
 receipt (received_sha256) is not a second source of identity: a difference from it is recorded as a bounded diagnostic
 (receipt_matched, one warning in the log) and gates nothing.
 
@@ -415,9 +417,14 @@ def _inspect(
     database_path: Path,
     quarantine_root: Path,
     scanner: Scanner,
+    engine: EngineIdentity,
     sealed: Sealed | None = None,
 ) -> Inspection:
     """Steps 2a to 2e above, on one descriptor. Raises on a file that cannot be inspected: that fails closed.
+
+    `engine` is the scanner's identity, read once by the caller: the cache is looked up under it, and the verdict is
+    recorded under it. A scanner whose identity is not the same after the scan as it was before is a scan whose engine
+    is not known, and it fails closed as a bad response.
 
     A rescan passes the delivery's `sealed` values. The digest is made the same way, by the same seam, from the stored
     bytes, and is compared with the sealed H before anything else: bytes that no longer hash to it are an integrity
@@ -442,7 +449,7 @@ def _inspect(
         now = to_micros(clock.now())
         conn = store.connect(database_path)
         try:
-            cached = lookup_verdict(conn, identity, scanner.engine, now)
+            cached = lookup_verdict(conn, identity, engine, now)
         finally:
             conn.close()
         if cached is not None:
@@ -455,6 +462,8 @@ def _inspect(
         except ScannerTimeout:
             return Inspection(**base, failure=audit.AuditReason.SCANNER_TIMEOUT)
         except ScannerBadResponse:
+            return Inspection(**base, failure=audit.AuditReason.SCANNER_BAD_RESPONSE)
+        if scanner.engine != engine:  # upgraded while it scanned: which engine made this verdict is not known
             return Inspection(**base, failure=audit.AuditReason.SCANNER_BAD_RESPONSE)
         stored.ensure_unchanged()  # the verdict is for the bytes that were hashed only if nothing changed meanwhile
         return Inspection(**base, reply=reply, scanned_at=now)
@@ -589,8 +598,9 @@ def _seal(
     if not admitted or admitted[0].decision is not decision:
         return request_flow.respond(decision)
     sealing = admitted[0]
+    engine = scanner.engine  # read once: the engine this seal looks the cache up under, scans with and records
     try:
-        inspection = _inspect(sealing.delivery, clock, database_path, quarantine_root, scanner)
+        inspection = _inspect(sealing.delivery, clock, database_path, quarantine_root, scanner, engine)
     except Exception as error:  # a file that cannot be inspected, a fault in the scanner: fail closed, stay in SEALING
         return request_flow.respond(request_flow.failure(error))
     decision = request_flow.proceed(
@@ -599,9 +609,7 @@ def _seal(
         caller=sealing.caller,
         grant=sealing.grant,
         production_id=sealing.delivery.production_id,
-        operation=functools.partial(
-            _record_outcome, delivery=sealing.delivery, inspection=inspection, engine=scanner.engine
-        ),
+        operation=functools.partial(_record_outcome, delivery=sealing.delivery, inspection=inspection, engine=engine),
     )
     return request_flow.respond(decision)
 
@@ -746,7 +754,7 @@ def rescan(
     if not started:
         raise RescanRefused(audit.AuditReason(begun.content["reason"]))
     rescanning = started[0]
-    inspection = _inspect(rescanning.delivery, clock, database_path, quarantine_root, scanner, rescanning.sealed)
+    inspection = _inspect(rescanning.delivery, clock, database_path, quarantine_root, scanner, engine, rescanning.sealed)
     outcome = request_flow.run_system(
         clock,
         database_path,
