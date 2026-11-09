@@ -2,6 +2,7 @@
 
 > **v0.1 — Educational Preview / Work in Progress.** Verified on macOS ARM64 and CPython 3.13 only; no independent human
 > review yet; one limitation open ([M4-01](docs/review/m4-findings.md)). [Limitations](#limitations-and-non-goals).
+> [Visual tour](https://outsidethecode.github.io/content-boundary-lab/).
 
 A security code-review lab: a service where an outside vendor delivers a file to a film or television production. Four
 planted flaws, one function each, are reproduced as working exploits and then blocked by the corrected reference
@@ -35,7 +36,7 @@ assumptions. [Write-ups](#the-findings) below.
 
 **Three questions.** Every request turns on *who are you* (a verified signed token), *what may you touch* (an engagement
 looked up each time, in the production the URL names) and *should these bytes be trusted* (decided from bytes the server
-hashed, never from what the sender declared). Each finding breaks one, in one function.
+hashed, never from what the sender declared). Each finding breaks one.
 
 ```mermaid
 flowchart LR
