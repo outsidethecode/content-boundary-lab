@@ -1,22 +1,24 @@
 # Publication record (M5)
 
 What the publication step (M0 section 9, M5) asked for, what was done, and what is still open.
-**Nothing has been pushed or published.** The repository's remote was not touched, no release was made, and no setting of
-the hosting service was changed. The state described here is the state after the M5 review of 2026-11-05: the
-implementation is committed locally, and the evidence was regenerated from that commit and committed after it (section 6).
-Section 5 is the register of what is still open before publication, with who resolves each item.
+**Published to GitHub `main` on 2026-11-09.** The owner approved the push in writing. Commit `947358b` was pushed to `main` as a
+normal fast-forward from `fb8be8e` (33 commits, no merge, no force, no tag); the development branch name was not published.
+No release has been made. The repository has been public since 2026-11-03, and its description was set at publication
+(section 6, item 5). Sections 1 to 4 describe the checks made before the push, as they stood on that day; section 5 is the
+register of what is settled and what is still open, with who resolves each item; section 6 says what was done for the evidence,
+the audit and the publication.
 
 ## 1. The deliverables
 
 | M0 deliverable | State | Where |
 |---|---|---|
 | The final README and finding pages | Done. The README follows M0 section 8: purpose, the three questions, a diagram with the finding tags, the findings table with links to the twin, the fix, the tests and the evidence, a quick start with its expected last line, the implemented/simulated/conceptual table, a card per finding, trade-offs and limits. Each finding page quotes its results and its matrix from the evidence files, and the checker verifies that | [README.md](../README.md), [docs/findings/](findings/F-02-object-access-checks-the-parent.md) |
-| A CI workflow, written and not pushed | Done, and it has never run. One job on macOS arm64, because the lock is verified for that platform only. A guard test holds what the file may say | [ci.yml](../.github/workflows/ci.yml), [test_workflow.py](../tests/guards/test_workflow.py) |
-| LICENSE and SECURITY.md | Done, with a licence that is a default awaiting your decision (section 5). SECURITY.md separates "report a bug in the reference" from "this is intentional" | [LICENSE](../LICENSE), [SECURITY.md](../SECURITY.md) |
+| A CI workflow | Done, and it has run once on GitHub (section 6, item 5): it passed. One job on macOS arm64, because the lock is verified for that platform only. A guard test holds what the file may say | [ci.yml](../.github/workflows/ci.yml), [test_workflow.py](../tests/guards/test_workflow.py) |
+| LICENSE and SECURITY.md | Done. The owner confirmed the licences on 2026-11-09 (section 5). SECURITY.md separates "report a bug in the reference" from "this is intentional", and the private reporting channel it names is enabled | [LICENSE](../LICENSE), [SECURITY.md](../SECURITY.md) |
 | A fresh-clone reproduction on macOS and Linux | macOS done; Linux not done (section 3) | section 3 |
 | A naming and trademark sweep | Done (section 4), with its limits | section 4 |
 | The link and snippet checker (M0 section 7) | Done | [tools/check_docs.py](../tools/check_docs.py), [test_check_docs.py](../tests/test_check_docs.py) |
-| Evidence regenerated from a clean tree (Addendum A11) | Done in two steps at M5, and **stale again after the corrections of AM-32** (section 6, item 4). The implementation commit carries evidence marked `PROVISIONAL`, because the commit it describes did not exist when the evidence was made. The commit after it holds the evidence regenerated from the implementation commit: `FINAL`, naming that commit, and changing nothing but the files of `docs/evidence/` (section 6) | [docs/evidence/](evidence/summary.txt) |
+| Evidence regenerated from a clean tree (Addendum A11) | Done at M5, redone after the corrections of AM-32, and redone once more after the publication corrections (section 6, items 2, 4 and 6). Each round is two commits: the change, which carries evidence that is `PROVISIONAL` or stale because the commit it describes did not exist when the evidence was made; and after it a commit that changes nothing but the files of `docs/evidence/`, holding the evidence regenerated from the first commit: `FINAL`, and naming it | [docs/evidence/](evidence/summary.txt) |
 
 ## 2. The acceptance criteria
 
@@ -24,7 +26,7 @@ Section 5 is the register of what is still open before publication, with who res
 |---|---|
 | The link and snippet checker passes | `python tools/check_docs.py` reports no problem. It follows every relative link and anchor, compares the four snippets in the README with their source and the 16 evidence blocks of the README, the walkthrough and the finding pages with their evidence files. `--final` also requires the evidence to be marked `FINAL` and to name a commit in the history whose `src/`, `labs/`, `tests/`, `requirements.lock` and `pyproject.toml` are those of HEAD; that commit need not be HEAD, so evidence can be committed after the commit it describes (section 6) |
 | A cold reader can state the project's purpose and the findings in about 90 seconds | **Not shown.** The part of the README above its quick start (the purpose, the three questions, the diagram and the findings table) is short enough for that, and a test keeps it short, but no person who has not seen the project has read it. That is a measure of length and not of understanding |
-| Nothing is pushed or published without approval | Nothing was pushed or published |
+| Nothing is pushed or published without approval | Met. The first push (`947358b` to `main`, 2026-11-09) was made on the owner's explicit written approval; each later push needs its own |
 
 ## 3. The fresh-clone reproduction
 
@@ -105,18 +107,29 @@ a Linux wheel of those three, find its hash is not in the lock, and refuse it (`
 - **Quoted standards text.** The documents cite requirement and weakness numbers and paraphrase them in a few words; they do
   not reproduce the text of OWASP ASVS (CC BY-SA 4.0) or of the MITRE CWE catalogue. The retrieval dates are in
   [references.md](references.md).
+- **Licence provenance (2026-11-09).** A technical review, made by searching the tracked files and the history, and not a legal
+  certification of ownership. It found no licence header, copied or vendored source, or third-party asset (every tracked file
+  is text, and no file was ever deleted from the history); no employer or client name, data or code (the scenario uses
+  `.example` domains and fictional production names); and no reproduction of the MovieLabs CSAP document, which is cited and
+  paraphrased only. The 25 locked packages declare permissive licences (MIT, MIT-0, BSD-2-Clause, BSD-3-Clause, PSF-2.0, and
+  Apache-2.0 or BSD for `cryptography` and `packaging`); none is copyleft, and none is bundled in the wheel or the source
+  distribution, so each keeps its own licence. `httpx2` and `httpcore2` are the `pydantic/httpx2` project (BSD-3-Clause),
+  checked on PyPI and GitHub. Not done: a licence scanner, a read of each dependency's licence file, and a legal review. The
+  licence of the generated output, and whether purely machine-generated text attracts copyright, depend on the law and on the
+  terms the owner accepted; this record does not decide either.
 
-## 5. The register of what is open before publication
+## 5. The register of what is settled and what is still open
 
-None of these is solved by a code change, and none is claimed anywhere as done. "Resolves" is who has to act.
+None of these is solved by a code change. **Settled** means the owner decided it on 2026-11-09; everything else is open and is
+not claimed anywhere as done. "Resolves" is who has to act.
 
 | Item | State today | What the repository says about it | Resolves |
 |---|---|---|---|
 | **Linux reproduction** (M0 required it) | **Outstanding.** Only macOS arm64, CPython 3.13.7, was run. The lock holds macOS arm64 hashes for `cffi`, `cryptography` and `pydantic_core`, so a Linux install by hash is refused | Not cross-platform verified; the README, claims register and threat model say one tested platform. Exact steps and the lock adjustments that may be needed are in section 3 | You: approve a Linux lock (the exact artefacts) and a Linux host, a VM or an image pull |
-| **Licence (D8)** | **Provisional.** `LICENSE` is MIT with the line `Copyright (c) 2026 outsidethecode`, and the documents are said to be CC BY 4.0. A Git author name is a pseudonym and is not proof of who owns the copyright | Default chosen so that the files exist for review; the claims register says the licence, its holder and the name are not confirmed | You: confirm or change the licence and the holder's legal name |
-| **GitHub workflow** | **Written, never executed on GitHub.** Locally, a guard test reads its text (SHA-pinned actions, read-only token, no `pull_request_target`, no event data in a script, the locked install by hash) and every command it runs was run by hand on macOS. Hosted-runner behaviour, the action versions running, and the `macos-` runner image are untested | The README and C-30 say it has not run; local validation is not described as a CI result | You: push when approved, then read the first run |
-| **Private vulnerability reporting** | **Not enabled, not verified.** It is a repository setting | SECURITY.md names it as the way to report. Until it is turned on, that sentence leads nowhere, and no document says the channel works | You: turn it on and send a test report, or change SECURITY.md to another channel |
-| **History (D9)** | **Flagged for privacy review.** The root commit's author address (the only one of the 28 earlier commits that is not the noreply address) is on a company domain, and the repository was reported public on 2026-11-03 | History was not rewritten and nothing in M5 changes it | You: decide whether to leave, to rewrite (which changes every commit hash and breaks the commit references in these documents) or to ask the hosting service to purge |
+| **Licence (D8)** | **Settled.** The owner approved MIT for the code (`LICENSE`, `Copyright (c) 2026 outsidethecode`) and CC BY 4.0 for the documents, with `outsidethecode` as the publishing and copyright identity, and stated that they have the rights to publish and that no employer or client holds rights in the work. `outsidethecode` is a handle, not a legal name, and this record cannot verify ownership; the claims register makes no claim about it. The project name is not cleared (see Name check) | A technical provenance review on 2026-11-09 (not a legal certification, and no licence scanner was run) found no copied or vendored third-party source, no third-party asset, no employer or client material, and no copyleft dependency among the 25 locked packages (declared metadata; nothing is bundled). Section 4 has the details | Done; the owner can change the holder name later |
+| **GitHub workflow** | **Ran once and passed (2026-11-09).** The first run, on the push of `947358b`, used the `macos-26-arm64` image and CPython 3.13.17 and passed every step (section 6, item 5). A guard test also reads its text (SHA-pinned actions, read-only token, no `pull_request_target`, no event data in a script, the locked install by hash). It is one run on one runner, on a newer patch release than the 3.13.7 of the local runs; nothing is shown for a pull-request run, for Linux or for Python 3.12 | The README and C-30 say one run, on one platform; a local run is not described as a CI result | You: read the next runs; the second push will start one |
+| **Private vulnerability reporting** | **Enabled on 2026-11-09 and read back as enabled through the GitHub API.** It is a repository setting. No test report has been sent, so that the channel delivers a report to the owner is not shown | SECURITY.md names it as the way to report, and no document says more than that it is switched on | You, if you want it shown: send yourself a test report |
+| **History (D9)** | **Settled (Option A).** The root commit's author address (the only commit whose author address is not the noreply address) is on a company domain, and the repository was public from 2026-11-03, before this push. The owner decided on 2026-11-09 to keep it | History was not rewritten and no force push was made; a purge of the old commit by the hosting service was not requested | Done. Rewriting later would change every commit hash and break the commit references in these documents |
 | **Human reviewer (D10)** | **D10 is still pending.** No human has read the code or the claims | The three AI reviews in [review/](review/m4-findings.md) are internal checks by the author's own model family; the README, claims register and M4 register say so | You: find a reviewer; [REVIEW-PACKAGE.md](review/REVIEW-PACKAGE.md) is written for one who has not seen the project |
 | **Cold read** | **Not shown.** The part of the README above the quick start is about 310 words and a test keeps it at 360 or fewer, which is compatible with a quick introduction | A measure of length, not of understanding; no one who had not seen the project has read it | A person who has not seen the project, with a clock |
 | **Name check** | **Not a clearance.** A web search found no project of the same name; no trademark register was searched | Section 4 says so | You, if the name matters legally |
@@ -149,5 +162,20 @@ M4-01, which stays a documented medium-severity limitation that is open ([m4-fin
    above were not repeated for AM-32 (the lock, the workflow and the build are unchanged). A text search of the tracked files
    for local paths, personal addresses and key markers was repeated on 2026-11-09: its one hit is a probe string in a test
    that checks the audit output contains no path.
-5. **Next, all yours:** the items of section 5; then push, with your explicit approval of each push. Re-run the audit and the
-   secret scan on the commit that is actually published, because an advisory published after 2026-11-05 is not covered.
+5. **First publication (2026-11-09).** With the owner's explicit written approval, after the checks of that day (the working tree
+   was clean at `947358b`; remote `main` was still `fb8be8e`, an ancestor of it; 33 commits, no merge, no tag), `947358b` was
+   pushed to `main` as a normal fast-forward. Afterwards the remote held `main` and nothing else, and the repository description
+   was set. The push started the workflow's first run (GitHub Actions, event `push`, job `tests`, 3 minutes 38 seconds): image
+   `macos-26-arm64`, CPython 3.13.17 from `actions/setup-python`, the locked install by hash, then 4063 tests passed in the
+   ordinary run (27 deselected) and 1, 24 and 2 in the `clean_env`, `real_server` and `packaging` runs, `python -m labs` ended
+   with its summary line, `python -m labs.matrix` ran, `check_docs.py` reported 0 problems (without `--final`), and `pip check`
+   was clean. That is a result on a newer patch release than the local runs and on one runner image.
+6. **Corrections after the push.** The statements that said nothing was pushed or that the workflow had never run, and the
+   licence rows that called the licence a default, were corrected in the README, this record, the claims register (C-30), the
+   threat model (TM-39), the workflow's header comment and the docstring of the workflow guard test. In
+   `tests/test_docs.py` the test of this record now asserts the published state, keeps its earlier checks (no placeholder,
+   D10 still pending) and adds two (the old sentence is gone, and the licence is no longer called provisional). No assertion
+   was removed or loosened. `tests/` is part of what the evidence describes, so the nine evidence files were regenerated from
+   the clean commit that holds these changes and committed after it; `check_docs.py --final` accepts them on the terms of
+   step 2. `pip-audit` has not been repeated since 2026-11-05, so an advisory published after that date is not covered.
+7. **Next, all yours:** the open items of section 5, and each later push with your explicit approval.

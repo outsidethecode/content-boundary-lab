@@ -162,10 +162,13 @@ def test_the_licence_exists_and_the_readme_says_which_licence_covers_what():
     assert "[MIT licence](LICENSE)" in page and "CC BY 4.0" in page and "is not affiliated with, endorsed by or sponsored by" in page
 
 
-def test_the_publication_record_is_finished_and_says_nothing_was_pushed():
+def test_the_publication_record_is_finished_and_says_what_was_published():
     body = text(PUBLICATION)
     assert "RESULT_" not in body and "TODO" not in body
-    assert "Nothing has been pushed or published" in body and "D10" in body and "pending" in body
+    assert "Published to GitHub `main` on 2026-11-09" in body and "947358b" in body and "normal fast-forward" in body
+    assert "Nothing has been pushed or published" not in body  # true before the first push, false since
+    assert "**Provisional.**" not in body  # the licence was confirmed by the owner; the record must not still call it a default
+    assert "D10" in body and "pending" in body
 
 
 # --- the threat model --------------------------------------------------------------------------------------------------------

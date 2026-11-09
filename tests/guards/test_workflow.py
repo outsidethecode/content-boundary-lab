@@ -1,11 +1,11 @@
-"""The CI workflow is written and not pushed (M0 section 9, M5), and what it is allowed to do is fixed here (V10).
+"""The CI workflow (M0 section 9, M5) first ran on GitHub on 2026-11-09, and what it is allowed to do is fixed here (V10).
 
 GitHub's guidance for workflows (the Actions security hardening guide on docs.github.com, retrieved 2026-11-05; docs/references.md): pin every
 action to a full commit SHA, give the token read-only repository contents and raise it only where a job needs more, do not
 use `pull_request_target` (or check out untrusted code in `workflow_run`), do not put untrusted event data into a script, and
 keep secrets out of workflow files. `actions/checkout` is told not to persist the token. These checks read the workflow as text,
 with the standard library: no YAML parser is installed, and the workflow uses no feature that needs one. They show the file says
-these things; they do not run it, and no run on GitHub has happened.
+these things; they do not run it. The one run on GitHub (2026-11-09) is recorded in docs/publication.md.
 """
 
 import re
