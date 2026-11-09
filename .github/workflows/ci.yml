@@ -1,4 +1,4 @@
-# Written for M5. First run on GitHub: 2026-11-09, a push of 947358b (now bf9e215), passed (macos-26-arm64, CPython 3.13.17); see docs/publication.md.
+# Written for M5. First run on GitHub: 2026-11-09, passed (macos-26-arm64, CPython 3.13.17); see docs/publication.md.
 # tests/guards/test_workflow.py holds what this file may do.
 #
 # One job, on macOS arm64, because requirements.lock is verified for CPython 3.13 on macOS arm64 only (its first lines say so);
