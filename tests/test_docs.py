@@ -34,7 +34,7 @@ REVIEW_PAGES = sorted((ROOT / "docs" / "review").glob("*.md"))  # M4: the review
 LABS_README = ROOT / "labs" / "README.md"
 DOCS = [
     ROOT / "docs" / name
-    for name in ("architecture.md", "threat-model.md", "references.md", "claims.md", "walkthrough.md", "publication.md")  # M5: the last two
+    for name in ("architecture.md", "threat-model.md", "references.md", "claims.md", "walkthrough.md", "publication.md", "fresh-assessment-followup.md")  # M5: the last two; AM-32: the follow-up record
 ] + FINDING_PAGES + REVIEW_PAGES
 README = ROOT / "README.md"
 SECURITY = ROOT / "SECURITY.md"

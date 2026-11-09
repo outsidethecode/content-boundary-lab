@@ -16,7 +16,7 @@ Section 5 is the register of what is still open before publication, with who res
 | A fresh-clone reproduction on macOS and Linux | macOS done; Linux not done (section 3) | section 3 |
 | A naming and trademark sweep | Done (section 4), with its limits | section 4 |
 | The link and snippet checker (M0 section 7) | Done | [tools/check_docs.py](../tools/check_docs.py), [test_check_docs.py](../tests/test_check_docs.py) |
-| Evidence regenerated from a clean tree (Addendum A11) | Done in two steps. The implementation commit carries evidence marked `PROVISIONAL`, because the commit it describes did not exist when the evidence was made. The commit after it holds the evidence regenerated from the implementation commit: `FINAL`, naming that commit, and changing nothing but the files of `docs/evidence/` (section 6) | [docs/evidence/](evidence/summary.txt) |
+| Evidence regenerated from a clean tree (Addendum A11) | Done in two steps at M5, and **stale again after the corrections of AM-32** (section 6, item 4). The implementation commit carries evidence marked `PROVISIONAL`, because the commit it describes did not exist when the evidence was made. The commit after it holds the evidence regenerated from the implementation commit: `FINAL`, naming that commit, and changing nothing but the files of `docs/evidence/` (section 6) | [docs/evidence/](evidence/summary.txt) |
 
 ## 2. The acceptance criteria
 
@@ -140,5 +140,14 @@ M4-01, which stays a documented medium-severity limitation that is open ([m4-fin
    `pip` in the test environment has the six advisories already recorded as TF-12), the secret scan found nothing new in 153
    files or in the 28 commits that existed before the M5 commit (all refs), and the built wheel and source distribution contain no `labs/`, no vulnerable
    module and no key or database file.
-4. **Next, all yours:** the items of section 5; then push, with your explicit approval of each push. Re-run the audit and the
+4. **Evidence after AM-32 (2026-11-09).** Corrections were made to `src/`, `labs/` and `tests/` after the evidence commit
+   above ([fresh-assessment-followup.md](fresh-assessment-followup.md)), so the `FINAL` files of step 2 described the tree
+   they were made from and not the corrected code. The AM-32 implementation commit carries all nine files as `PROVISIONAL`,
+   because they were regenerated from its uncommitted tree. The evidence commit after it regenerates all nine from that clean
+   implementation commit, names it as the tested source revision and says `FINAL`; `check_docs.py --final` accepts them on
+   the same terms as step 2, and that commit changes only files in `docs/evidence/`. `pip-audit` and the full secret scan
+   above were not repeated for AM-32 (the lock, the workflow and the build are unchanged). A text search of the tracked files
+   for local paths, personal addresses and key markers was repeated on 2026-11-09: its one hit is a probe string in a test
+   that checks the audit output contains no path.
+5. **Next, all yours:** the items of section 5; then push, with your explicit approval of each push. Re-run the audit and the
    secret scan on the commit that is actually published, because an advisory published after 2026-11-05 is not covered.

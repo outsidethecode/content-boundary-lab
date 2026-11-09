@@ -230,6 +230,36 @@ def test_a_delivery_that_is_not_accepted_or_not_of_this_production_is_not_promot
     assert world.delivery(accepted)["state"] == "ACCEPTED" and files(world) == []
 
 
+# --- IR-05: the gate looks at the signature; the name is the vendor's -------------------------------------------------------------
+# A file that starts with the PNG signature is allowed whatever it is called. These two tests pin what the application does
+# about that, and what it does not: they are evidence for the written risk (docs/threat-model.md TM-39), not a new control.
+
+POLYGLOT = b"\x89PNG\r\n\x1a\n" + b"\n<p>synthetic text after a PNG signature; nothing executable</p>\n"
+
+
+def test_a_png_signature_under_an_html_name_is_still_served_only_as_an_attachment_of_unknown_type(world):
+    """No header here lets a browser interpret the bytes: an octet-stream that must not be sniffed and is offered for saving."""
+    delivery = world.sealed(POLYGLOT, display_name="shot-031.html", declared_media_type="image/png")
+    assert world.accept("coordinator_a", world.a, delivery, sha256(POLYGLOT).hexdigest()).status_code == 200
+    asset = world.promote(world.a, delivery).result["asset_id"]
+    got = world.download("vendor_a", world.a, asset)
+    assert got.status_code == 200 and got.content == POLYGLOT
+    assert got.headers["content-type"] == "application/octet-stream"  # not text/html, and not image/png either
+    assert got.headers["x-content-type-options"] == "nosniff"
+    assert got.headers["cache-control"] == "no-store"
+    assert got.headers["content-disposition"] == "attachment; filename=\"shot-031.html\"; filename*=UTF-8''shot-031.html"
+
+
+def test_the_coordinator_is_not_shown_the_name_or_the_declared_type_when_deciding_to_accept(world):
+    """The remaining risk, stated as a fact: the extension the vendor chose is what the recipient's desktop will use, and the
+    decision to accept is made on the digest and the verdict, without the name. The application does not compare the two."""
+    delivery = world.sealed(POLYGLOT, display_name="shot-031.html", declared_media_type="image/png")
+    view = world.inspect("coordinator_a", world.a, delivery).json()
+    assert view["state"] == "SCAN_PASSED"
+    assert not {"display_name", "declared_media_type", "media_type", "filename"} & set(view)
+    assert world.delivery(delivery)["display_name"] == "shot-031.html"  # kept as declared; only its download spelling is cleaned
+
+
 def test_the_composed_application_serves_no_documentation_and_only_the_approved_routes(world):
     for path in ("/docs", "/redoc", "/openapi.json"):
         assert world.client.get(path).status_code == 404

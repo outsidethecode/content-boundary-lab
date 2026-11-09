@@ -6,11 +6,12 @@ the token is signed by the same key and verifies the same way; what differs is w
 engagement the coordinator revoked, or that has ended, while the token is still good. Synthetic data only.
 """
 
+import pytest
 from support.findings import variants
 
 from labs import f06_stale_authorisation as f06
-from labs.seam import applied
-from labs.world import World
+from labs.seam import applied, restored
+from labs.world import ALPHA_ASSET, World
 
 case = variants(f06)
 
@@ -64,6 +65,77 @@ def test_an_engagement_that_has_ended_is_honoured_by_the_reference_and_ignored_b
 def test_a_token_that_claims_a_production_it_has_no_engagement_in_grants_nothing_in_the_reference(case):
     variant, facts, _ = case
     assert facts["claim_status"] == (200 if seeded(variant) else 403)
+
+
+# --- the coordinator path (IR-11): the window is short, what is made in it is not ---------------------------------------------
+
+
+def test_a_revoked_coordinator_whose_token_is_still_good_can_enrol_another_subject_only_in_the_seeded_variant(case):
+    variant, facts, _ = case
+    assert facts["coordinator_revoke_status"] == 200  # the revocation itself succeeded, in both
+    assert facts["coordinator_enrol_status"] == (201 if seeded(variant) else 403)
+    assert facts["coordinator_enrolled_rows"] == (1 if seeded(variant) else 0)
+    assert f06.scenario.outlived_the_window(facts) is seeded(variant)
+
+
+def test_the_enrolment_is_attributed_to_the_revoked_coordinator_and_looks_like_any_other_creation_in_the_seeded_variant(case):
+    variant, facts, _ = case
+    assert facts["coordinator_enrol_actor"] == "coordinator-alpha-1"  # the verified subject, in both
+    expected = ("engagement.created", "allowed", None) if seeded(variant) else ("access.denied", "denied", "engagement_revoked")
+    assert facts["coordinator_enrol_audit"] == expected
+
+
+def test_with_the_normal_authoriser_back_the_same_token_is_refused_while_it_is_good_and_a_401_after(case):
+    """Both variants, and the same: the window was the seeded decision, not the token. The token itself was never the problem."""
+    _, facts, _ = case
+    assert facts["coordinator_token_after_restore"] == 403
+    assert facts["coordinator_token_after_expiry"] == 401
+
+
+def test_the_enrolled_subject_keeps_legitimate_database_backed_access_after_the_window_and_after_the_fix(case):
+    variant, facts, world = case
+    if seeded(variant):
+        assert (facts["accomplice_engagement_status"], facts["accomplice_role"]) == (200, "coordinator")
+        assert facts["accomplice_grant_days"] == 90  # the cap: ninety days from a request made in a window of at most ten minutes
+        assert facts["accomplice_asset_status"] == 200 and facts["accomplice_asset_bytes"] == len(ALPHA_ASSET)
+    else:
+        assert facts["accomplice_engagement_status"] == 403 and facts["accomplice_role"] is None
+        assert facts["accomplice_asset_status"] == 403
+    rows = world.rows("SELECT e.role, e.revoked_at FROM engagements AS e JOIN subjects AS s ON s.id = e.subject_id "
+                      "WHERE s.subject = ? AND e.production_id = ?", world.subject("bravo_vendor"), world.production["alpha"])
+    assert rows == ([{"role": "coordinator", "revoked_at": None}] if seeded(variant) else [])  # an ordinary row, revoked by no one
+
+
+def test_the_enrolled_subject_is_judged_by_the_reference_alone_and_the_seeded_function_is_not_needed_again(case):
+    """The follow-up requests ran with the reference back in force (labs.seam.restored): the grant stands on its own."""
+    variant, facts, _ = case
+    assert facts["follow_up_authoriser_was_reference"] is True
+
+
+def test_the_seam_is_the_same_single_function_in_the_coordinator_scenario():
+    assert f06.SEAM.where == "content_boundary_lab.authz.authorize_engagement"  # no second seam and no changed reference function
+
+
+def test_restoring_the_reference_inside_a_block_puts_back_whatever_was_in_force_and_never_installs_a_twin():
+    reference, twin = f06.SEAM.reference, f06.SEAM.vulnerable
+    assert getattr(f06.SEAM.module, f06.SEAM.name) is reference
+    with restored(f06.SEAM):  # nothing applied: nothing to put back, and the reference stays
+        assert getattr(f06.SEAM.module, f06.SEAM.name) is reference
+    with applied(f06.SEAM):
+        assert getattr(f06.SEAM.module, f06.SEAM.name) is twin
+        with restored(f06.SEAM):
+            assert getattr(f06.SEAM.module, f06.SEAM.name) is reference
+        assert getattr(f06.SEAM.module, f06.SEAM.name) is twin  # the exploit's function is back in force
+    assert getattr(f06.SEAM.module, f06.SEAM.name) is reference
+
+
+def test_restoring_the_reference_is_undone_even_when_the_block_fails():
+    with applied(f06.SEAM):
+        with pytest.raises(RuntimeError):
+            with restored(f06.SEAM):
+                raise RuntimeError("fault")
+        assert getattr(f06.SEAM.module, f06.SEAM.name) is f06.SEAM.vulnerable
+    assert getattr(f06.SEAM.module, f06.SEAM.name) is f06.SEAM.reference
 
 
 def test_the_window_is_the_life_of_the_token_and_no_longer(tmp_path):

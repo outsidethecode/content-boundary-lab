@@ -9,8 +9,9 @@ import pytest
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 from support import token_issuer as tokens
+from support.dev_area import case_alias
 
-from content_boundary_lab.app import Dependencies, create_app
+from content_boundary_lab.app import Dependencies, check_separate_roots, create_app
 from content_boundary_lab.clock import SystemClock
 from content_boundary_lab.scanner import LabSyntheticMarkerScanner
 
@@ -183,6 +184,47 @@ def test_quarantine_and_trusted_storage_can_never_be_the_same_place_or_nested(tm
 def test_sibling_directories_are_separate_roots(tmp_path):
     deps = Dependencies(**{**_complete(tmp_path), "asset_root": tmp_path / "a", "quarantine_root": tmp_path / "ab"})
     assert deps.asset_root != deps.quarantine_root  # a shared name prefix is not nesting
+
+
+def test_two_spellings_of_one_directory_that_differ_only_in_letter_case_are_not_separate_roots(tmp_path):
+    """Where the filesystem ignores case (macOS by default), `Quarantine` and `quarantine` are one directory: resolve() keeps them apart."""
+    quarantine = tmp_path / "quarantine"
+    quarantine.mkdir()
+    alias = case_alias(quarantine)
+    if alias is None:
+        pytest.skip("this filesystem tells names that differ in letter case apart: there is no such alias to refuse")
+    for trusted, other in ((alias, quarantine), (quarantine, alias)):
+        with pytest.raises(ValueError, match="separate"):
+            Dependencies(**{**_complete(tmp_path), "asset_root": trusted, "quarantine_root": other})
+    inner = quarantine / "inside"
+    inner.mkdir()
+    with pytest.raises(ValueError, match="separate"):  # and nested through the alias
+        Dependencies(**{**_complete(tmp_path), "asset_root": alias / "inside", "quarantine_root": quarantine})
+    with pytest.raises(ValueError, match="separate"):
+        Dependencies(**{**_complete(tmp_path), "asset_root": inner, "quarantine_root": alias})
+
+
+def test_the_separation_check_is_one_function_used_by_the_dependencies_and_the_runner(tmp_path, monkeypatch):
+    """There is one definition of 'separate places': the dependencies call it, and the runner calls the very same function."""
+    from content_boundary_lab import app as app_module
+    from content_boundary_lab import runner
+
+    assert runner.check_separate_roots is check_separate_roots
+    seen = []
+    monkeypatch.setattr(app_module, "check_separate_roots", lambda *roots: seen.append(roots))
+    Dependencies(**_complete(tmp_path))
+    assert seen == [(tmp_path / "assets", tmp_path / "quarantine")]
+    monkeypatch.undo()
+    trusted, quarantine = tmp_path / "trusted", tmp_path / "quarantine"
+    trusted.mkdir()
+    quarantine.mkdir()
+    check_separate_roots(trusted, quarantine)  # separate directories: no error
+    check_separate_roots(tmp_path / "does-not-exist-a", tmp_path / "does-not-exist-b")  # nothing to alias yet: textual rules only
+    for first, second in ((trusted, trusted), (trusted, trusted / "x"), (tmp_path / "gone", tmp_path / "gone" / "x")):
+        with pytest.raises(ValueError, match="separate"):
+            check_separate_roots(first, second)
+        with pytest.raises(ValueError, match="separate"):
+            check_separate_roots(second, first)
 
 
 def test_the_asset_root_must_be_an_absolute_path_so_it_cannot_depend_on_the_working_directory(tmp_path):

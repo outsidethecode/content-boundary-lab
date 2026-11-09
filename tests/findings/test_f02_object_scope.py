@@ -60,7 +60,7 @@ def test_the_audit_trail_shows_the_difference(case):
     assert facts["trusted_unchanged"]  # reading changes nothing in the trusted root
 
 
-def test_a_naive_fix_that_checks_the_assets_own_production_but_not_the_url_still_leaks_to_a_caller_engaged_in_both(tmp_path):
+def test_a_naive_fix_that_checks_the_assets_own_production_but_not_the_url_still_binds_the_asset_to_the_wrong_production_for_a_caller_engaged_in_both(tmp_path):
     """The fix that asks only 'is the caller engaged where the asset lives?' repairs the vendor case and not this one."""
     from labs.world import World
 
@@ -79,4 +79,5 @@ def test_a_naive_fix_that_checks_the_assets_own_production_but_not_the_url_still
         vendor_only_alpha = world.read_asset("alpha_vendor", "alpha", "bravo")
         engaged_in_both = world.read_asset("dual_vendor", "alpha", "bravo")
     assert vendor_only_alpha.status == 404  # the headline case is repaired
-    assert (engaged_in_both.status, engaged_in_both.body) == (200, BRAVO_ASSET)  # the url/asset-owner relationship is not
+    assert (engaged_in_both.status, engaged_in_both.body) == (200, BRAVO_ASSET)  # the url/asset-owner relationship is not: a wrong
+    # binding, and no disclosure beyond entitlement, because this caller is engaged in BRAVO as well

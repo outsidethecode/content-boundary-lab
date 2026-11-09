@@ -19,10 +19,13 @@ and, optionally, use "sig" and alg "ES256" with exactly those values. Anything e
 reinterpreted: private-key members (d and the RSA and symmetric ones), key URLs and certificates (jku, x5u, x5c, x5t),
 key_ops, other types and curves, repeated member names, and the same key under two kids.
 
-Both files are read with a size limit, and error messages never repeat file content or key material.
+Both files are read with a size limit, and error messages never repeat file content or key material. Each must be a regular
+file (not a link) owned by the user running the lab and not writable by its group or by others; the check is made on the
+descriptor that is read (see _read_bounded), and a file that fails it is refused before anything else is done with it.
 """
 
 import base64
+import errno
 import json
 import os
 import re
@@ -105,13 +108,29 @@ class TrustedSettings:
 
 
 def _read_bounded(path: Path, limit: int, label: str) -> bytes:
-    """The contents of a regular file of at most `limit` bytes; never more than limit + 1 bytes are read."""
+    """The contents of a file of at most `limit` bytes; never more than limit + 1 bytes are read.
+
+    The file is opened once, without following a link in its last component, and judged on that descriptor: a regular file,
+    owned by the user running the lab, that neither the group nor others can write. What is read is what was judged, whatever
+    happens to the name afterwards, so there is no gap between a check and a use. These files say who may sign in as whom, so
+    what matters is that nobody else can change them; public keys are not secret, so who may read them is not examined (the
+    runner applies the same owner and mode rule to the database and the storage roots). The directories above the file are
+    not examined: whoever can rename things in them is assumed to be the operator, as for every other path the lab uses.
+    """
     try:
-        with path.open("rb") as handle:
-            if not stat.S_ISREG(os.fstat(handle.fileno()).st_mode):
+        descriptor = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK | os.O_CLOEXEC)  # NONBLOCK: a FIFO cannot hang it
+        with os.fdopen(descriptor, "rb") as handle:
+            info = os.fstat(handle.fileno())
+            if not stat.S_ISREG(info.st_mode):
                 raise ConfigurationError(f"the {label} is not a regular file")
+            if info.st_uid != os.geteuid():
+                raise ConfigurationError(f"the {label} must be owned by the user running the lab")
+            if info.st_mode & 0o022:
+                raise ConfigurationError(f"the {label} must not be writable by its group or by others")
             data = handle.read(limit + 1)
     except (OSError, ValueError) as error:
+        if getattr(error, "errno", None) == errno.ELOOP:  # O_NOFOLLOW: the last component is a symbolic link
+            raise ConfigurationError(f"the {label} must not be a symbolic link") from None
         reason = getattr(error, "strerror", None) or "invalid path"
         raise ConfigurationError(f"the {label} cannot be read ({type(error).__name__}: {reason})") from None
     if len(data) > limit:

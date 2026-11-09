@@ -79,6 +79,7 @@ RECONCILIATION_READS = (
 FILE_OPERATIONS = {"open", "rename", "replace", "unlink", "link", "mkdir", "rmdir", "remove", "symlink", "truncate"}
 PATH_METHODS = {"write_bytes", "write_text", "unlink", "rename", "rmdir", "mkdir", "touch", "symlink_to", "hardlink_to"}
 FILE_MODULES = {Path("assets.py"), Path("quarantine.py")}
+CONFIGURATION_MODULES = {Path("settings.py")}  # opens the settings file and the key set, read-only, once each (IR-04)
 
 
 def _statements(source: str, names: re.Pattern = NAMES_DELIVERIES) -> list[tuple[int, str]]:
@@ -587,9 +588,17 @@ def test_the_guard_sees_the_ways_of_writing_to_a_directory(source):
     assert file_operations(source)
 
 
-def test_only_the_trusted_and_the_quarantine_modules_open_move_or_delete_files():
+def test_only_the_two_storage_modules_and_the_settings_loader_open_move_or_delete_files():
+    """The loader of the trusted configuration is the one addition (IR-04): it opens the two configuration files and nothing else."""
     users = {path.relative_to(PACKAGE) for path in PACKAGE.rglob("*.py") if file_operations(path.read_text())}
-    assert users == FILE_MODULES
+    assert users == FILE_MODULES | CONFIGURATION_MODULES
+
+
+def test_the_settings_loader_opens_files_read_only_and_through_one_call_that_judges_the_descriptor():
+    source = (PACKAGE / "settings.py").read_text()
+    assert file_operations(source) == ["os.open"]  # one open, no move, delete or write
+    assert {"O_RDONLY", "O_NOFOLLOW"} <= identifiers(source)
+    assert not {"O_WRONLY", "O_RDWR", "O_CREAT", "O_TRUNC", "O_APPEND", "O_EXCL"} & identifiers(source)
 
 
 def identifiers(source: str) -> set[str]:

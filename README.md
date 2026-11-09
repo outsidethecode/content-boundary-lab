@@ -27,9 +27,9 @@ flowchart LR
 | Finding | Boundary | Severity (in-scenario, educational) | CWE | ASVS 5.0.0 | Code | Tests | Evidence |
 |---|---|---|---|---|---|---|---|
 | **F-02** Object access checks the parent, not the child | TB3 | High | 639 | 8.2.2, 8.4.1 | [twin](labs/f02_parent_check/vulnerable.py), [fix](src/content_boundary_lab/assets.py) | [tests](tests/findings/test_f02_object_scope.py) | [f02](docs/evidence/f02.txt) |
-| **F-03** Caller-declared checksum used as content identity | TB5 | High | 807 | 5.4.3, 2.2.2, 16.5.3 | [twin](labs/f03_declared_identity/vulnerable.py), [fix](src/content_boundary_lab/trust.py) | [tests](tests/findings/test_f03_declared_identity.py) | [f03](docs/evidence/f03.txt) |
+| **F-03** Caller-declared checksum used as content identity | TB5 | Medium here: the scan is bypassed, and independent promotion keeps the bytes out of trusted storage | 807 | 5.4.3, 2.2.2, 16.5.3 | [twin](labs/f03_declared_identity/vulnerable.py), [fix](src/content_boundary_lab/trust.py) | [tests](tests/findings/test_f03_declared_identity.py) | [f03](docs/evidence/f03.txt) |
 | **F-04** Promotion trusts a mutable reference, not the accepted bytes | TB4 | High if quarantine is writable after the seal | 367 | 15.4.2, 2.3.1, 2.3.3 | [twin](labs/f04_unverified_promotion/vulnerable.py), [fix](src/content_boundary_lab/promotion.py) | [tests](tests/findings/test_f04_unverified_promotion.py) | [f04](docs/evidence/f04.txt) |
-| **F-06** Authorisation snapshot in a long-lived token | TB3 | Medium | 863 | 8.3.2, 7.4.2 | [twin](labs/f06_stale_authorisation/vulnerable.py), [fix](src/content_boundary_lab/authz.py) | [tests](tests/findings/test_f06_stale_authorisation.py) | [f06](docs/evidence/f06.txt) |
+| **F-06** Authorisation snapshot in a long-lived token | TB3 | High for a coordinator (an unauthorised engagement of up to 90 days from a token of at most ten minutes); Medium for a vendor | 863 | 8.3.2, 7.4.2 | [twin](labs/f06_stale_authorisation/vulnerable.py), [fix](src/content_boundary_lab/authz.py) | [tests](tests/findings/test_f06_stale_authorisation.py) | [f06](docs/evidence/f06.txt) |
 
 Passing tests show that the seeded defect is reproducible and that the corrected code blocks it under the stated assumptions;
 they show nothing more. Write-ups: [F-02](docs/findings/F-02-object-access-checks-the-parent.md),
@@ -78,10 +78,12 @@ The lab's scanner detects one synthetic marker. It provides no malware protectio
 - A **vendor** declares a delivery (name, size, SHA-256 and type, all *claims*), uploads the bytes into **quarantine**, and
   asks the server to **seal** it.
 - At the seal the server hashes the stored bytes itself (**H**), compares the claims with what it measured, checks the
-  signature allowlist, and reuses a stored clean verdict for H or asks the scanner.
+  signature allowlist, and reuses a stored `no_detection` verdict for H or asks the scanner.
 - A coordinator accepts **exactly H**; a **system job** with no route then copies the bytes into the **trusted store**,
   hashing as it copies, and publishes them only if they are the accepted bytes.
-- Engaged people read the asset through the API, and every decision, allowed or denied, leaves exactly one audit event.
+- Engaged people read the asset through the API. Every decision the application or a system job commits leaves exactly one
+  audit event, in the same transaction (an upload and a seal are two decisions; the router's own 404 and 405 answers, `seed-demo`
+  and the removal of the lab's scratch files are not audited).
 
 ## The findings
 
@@ -116,12 +118,17 @@ Reproduce: `python -m labs.f02_parent_check` or `pytest tests/findings/test_f02_
 RESULT     seeded variant exploited: YES   reference blocked: YES
 ```
 
-**Limits.** Access is scoped per production, not per object within it. Everything is synthetic. [Write-up](docs/findings/F-02-object-access-checks-the-parent.md).
+**Limits.** Access is scoped per production, not per object within it. A caller engaged in both productions is entitled to
+both assets, so for that caller the flaw is a wrong production binding (a read authorised and recorded under the wrong
+production) and not a disclosure. Everything is synthetic. [Write-up](docs/findings/F-02-object-access-checks-the-parent.md).
 
 ### F-03: caller-declared checksum used as content identity
 
 **Root cause.** The verdict cache is keyed on the checksum the vendor declared, not on a digest of the stored bytes, so a
-clean verdict can be reused for different bytes. **Impact.** Unscanned bytes reach the point where a coordinator can accept them.
+`no_detection` verdict can be reused for different bytes. **Impact.** The scan boundary is bypassed: unscanned bytes reach the
+point where a coordinator can accept them, under a verdict and a digest that were made for other bytes. Trusted storage is not
+reached: the independent promotion control hashes what it copies and refuses them. That is why the severity is Medium in this
+lab; it is not rated for a system without that control.
 
 <details><summary>The seeded twin, whole function</summary>
 
@@ -180,8 +187,12 @@ are the accepted bytes; it does not look at anything that happened after the acc
 ### F-06: authorisation snapshot in a long-lived token
 
 **Root cause.** Authorisation comes from a `productions` claim that the identity provider put in the token, instead of from
-the engagement store at the time of the request. **Impact.** Revoking an engagement, or reaching its end date, changes
-nothing until the token expires.
+the engagement store at the time of the request. **Impact.** A revoked or ended engagement is still honoured for the decisions
+that rest on authorisation alone, until the token expires (at most ten minutes here). The lookups that re-check the engagement
+(the asset read, the seal, the acceptance) still refuse. For a **coordinator** the window is not the whole impact: a revoked
+coordinator can create an unauthorised engagement for another subject, up to 90 days long, and that grant is an ordinary row
+that the reference honours after the token has expired and after the flaw is fixed, substantially longer than the token that
+made it. For a **vendor** the window is the whole impact: it can still see its own engagement and declare a delivery.
 
 <details><summary>The seeded twin, whole function</summary>
 
@@ -209,7 +220,9 @@ Reproduce: `python -m labs.f06_stale_authorisation` or `pytest tests/findings/te
 RESULT     seeded variant exploited: YES   reference blocked: YES
 ```
 
-**Limits.** A revocation is final for requests that begin after it commits; a transfer that has begun may finish.
+**Limits.** A revocation is final for requests that begin after it commits; a transfer that has begun may finish. The
+coordinator path uses the same single seam, and the grant it leaves survives the fix until it ends or is revoked. The lab has no
+studio-administrator actor, so the revoked coordinator is revoked by its own call.
 [Write-up](docs/findings/F-06-authorisation-snapshot-in-a-long-lived-token.md).
 
 ### Remediation matrices
@@ -242,14 +255,14 @@ its control and the tests for it, or marked as a limitation or out of scope. The
 
 - **One tested platform.** `requirements.lock` is verified for CPython 3.13.7 on macOS arm64. Linux and Python 3.12 are not verified, and the hash check refuses them until each has its own lock.
 - **No independent review yet.** Three AI reviews, each in a context of its own and of the same model family as the author, are in [docs/review/](docs/review/m4-findings.md). They are an internal check, not an independent one. A human reviewer has not read the code (decision D10 is pending).
-- **Accepted limits.** Promotion does not look at anything that happened after an acceptance (a revocation, an expired verdict, a later detection of the same bytes); the verdict cache is shared across productions; the lab makes no confidentiality claim against another local account and no defence against a party who can write its storage. Each is in the threat model and the [M4 register](docs/review/m4-findings.md).
+- **Accepted limits.** Promotion does not look at anything that happened after an acceptance (a revocation, an expired verdict, a later detection of the same bytes); the verdict cache is shared across productions; the lab makes no confidentiality claim against another local account and no defence against a party who can write its storage; a vendor's file name, extension included, is the name of the download and is not compared with the detected file signature or the declared type, and the coordinator is not shown it when accepting ([TM-40](docs/threat-model.md)); a wrong quarantine root looks like missing bytes ([TM-41](docs/threat-model.md)). Each is in the threat model and the [M4 register](docs/review/m4-findings.md) or the [follow-up record](docs/fresh-assessment-followup.md).
 - **Synthetic parts.** The scanner, the identity provider and the object stores are stand-ins. The server listens on `127.0.0.1` with no TLS and is for local study.
 - **Not built.** F-01 and F-05, a withdrawal for accepted content, a threat feed, a takedown after promotion, cloud storage, a front end.
 - **Continuous integration** is written ([`.github/workflows/ci.yml`](.github/workflows/ci.yml)) and its text is checked by a guard test; it has not run anywhere.
 
 ## Run the lab locally
 
-For local study only: it listens on `127.0.0.1` and nowhere else, with no TLS, and nothing in it is meant to face a network. Every value the lab trusts is named on the command line or fixed in the runner's code: there is no environment variable and no default, and the runner refuses to start without a loadable key set, a database of the lab's own schema, and two storage directories that are its own and not writable by anyone else. The scanner is the synthetic one, and the start-up banner says so. Install the locked environment first, as under "Run the tests" below, and use that environment's `python`.
+For local study only: it listens on `127.0.0.1` and nowhere else, with no TLS, and nothing in it is meant to face a network. Every value the lab trusts is named on the command line or fixed in the runner's code: there is no environment variable and no default, and the runner refuses to start without a loadable settings file and key set (regular files, not links, owned by the user running the lab and not writable by their group or by others: they decide who may sign in, so what matters is that nobody else can change them), a database of the lab's own schema, and two storage directories that are its own, not writable by anyone else, and separate places (every command that is given both roots refuses a pair that is one directory, nested, or two names for one place). The scanner is the synthetic one, and the start-up banner says so. Install the locked environment first, as under "Run the tests" below, and use that environment's `python`.
 
 ```bash
 python tools/dev_token_issuer.py setup                       # a throwaway key, the trusted settings and two private directories in .dev/
@@ -260,6 +273,8 @@ python -m content_boundary_lab.runner serve --settings .dev/settings.toml --data
 ```
 
 `serve` runs `uvicorn` as a library with one worker, no reload and no proxy headers, whatever the server's environment variables say (Python's own, such as `PYTHONPATH`, are the operator's: the tests start the runner with `python -I`). `promote`, `rescan` and `reconcile` are the lab's own jobs, run by the operator, and `reconcile` refuses to start while a server, a promotion or a rescan is running on the same directories. [Architecture](docs/architecture.md) section 14 describes each command and what it does to the lab. A delivery stranded in `SEALING` is listed by `reconcile` and nothing moves it: an operator investigates it (A-J7, a known availability limit). The [walkthrough](docs/walkthrough.md) runs one delivery through a real local server, command by command.
+
+**Name the same quarantine root every time.** `promote`, `rescan` and `reconcile` cannot tell a mistyped `--quarantine-root` from a root whose files have gone: a delivery whose file is not at the root you name ends in `INTEGRITY_FAILED` (`promote`, `reconcile`; final, with an audit event that says the sealed content changed, which it did not) or stays in `SEALING` (`rescan`), and neither can be undone ([TM-41](docs/threat-model.md)). Keep the paths in one script or set of variables, and before a job check that the delivery's file is where you are about to say it is: read its storage key from the database (`SELECT storage_key FROM deliveries WHERE id = '…'`) and look for that name in the root.
 
 To see the real server work, run `.venv/bin/python -m pytest -m real_server -s`: it starts `serve` on a random loopback port, speaks HTTP to it with synthetic data, and stops it. It needs `lsof` and is left out of the ordinary run.
 

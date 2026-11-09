@@ -89,6 +89,7 @@ def test_the_f06_matrix_separates_the_two_naive_fixes_by_what_each_misses():
     assert by_key["N1"] == by_key["V"]  # re-checking the token repairs nothing
     assert by_key["N2"] == {"X3", "X4"}  # the store is read and revocation honoured; only the end-date boundary rows fail
     assert {"T1", "T2", "T3", "T4", "T5", "T6", "T7"}.isdisjoint(by_key["V"])  # the verifier is intact in the seeded variant too
+    assert "X9" in by_key["V"] and "X9" in by_key["N1"] and "X9" not in by_key["N2"]  # IR-11: a store read that honours revocation leaves no grant
 
 
 def test_the_f04_matrix_separates_the_two_naive_fixes_by_what_each_misses():

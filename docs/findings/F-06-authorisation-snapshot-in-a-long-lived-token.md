@@ -5,7 +5,7 @@
 | | |
 |---|---|
 | Boundary | TB3: what may you touch? (the authorisation decision, made after authentication) |
-| Severity (in-scenario, educational) | Medium |
+| Severity (in-scenario, educational) | High for a coordinator: a revoked coordinator creates an unauthorised engagement of up to 90 days from a token that lasts at most ten minutes (demonstrated). Medium for a vendor: two actions, bounded by the token's life (demonstrated) |
 | Weakness | CWE-863, a Class that MITRE marks "Allowed-with-Review": no Base child fits stale authorisation better, which is why it is used; CWE-1464 (Improper Session Invalidation) is related. CWE-613 is deprecated and "Prohibited" for mapping, so it is not used |
 | ASVS 5.0.0 | 8.3.2 (L3, authorisation changes apply immediately, or compensating controls exist), 7.4.2 (L1, end sessions when an account is disabled), 9.2.1 (L1, enforce token validity times) |
 | Seam | `authz.authorize_engagement`; the seeded twin is [labs/f06_stale_authorisation/vulnerable.py](../../labs/f06_stale_authorisation/vulnerable.py) |
@@ -23,8 +23,19 @@ for itself is **immediate revocation for time-boxed external access to unrelease
 **Attacker capability.** A former vendor, or one whose time has run out, who still holds a token that has not expired. It does
 nothing but use the token. It forges nothing.
 
-**Impact.** The vendor keeps the access the coordinator took away for as long as the token lives: it can still see its
-engagement and still declare new deliveries. Revocation during a suspected leak fails exactly when it matters.
+**Impact.** Revocation during a suspected leak fails exactly when it matters, in two ways that differ in what the stale
+decision can leave behind. The exploitation window is short in both: the life of the token, at most ten minutes here.
+
+- **A coordinator (the more serious path).** A decision that creates authority outlives the window. A revoked coordinator,
+  in the same ten minutes, can create an unauthorised engagement for another subject, with an end date up to 90 days away.
+  That engagement is an ordinary row in the engagement store: the reference honours it like any other, after the token has
+  expired and after the flaw is fixed, until it ends or a coordinator revokes it. The short window is the exploitation; the
+  90 days is the lifetime of the unauthorised grant, which is substantially longer than the token that made it. In the lab
+  the new subject then reads ALPHA's unreleased asset.
+- **A vendor.** Until its token expires, a revoked vendor keeps the decisions that rest on authorisation alone: it can still
+  see its own engagement and still declare new deliveries. The lookups that re-check the engagement in their own statement
+  (the asset read, and the seals and acceptances that follow a delivery) still refuse, so revocation does not stop everything,
+  and the lab does not add a second flaw to make it look as if it did. What a vendor can do is bounded by the window.
 
 **Honesty note.** ASVS 8.3.2 explicitly allows compensating controls where self-contained tokens make immediate revocation
 impossible. F-06 is a finding **against this lab's stated requirement**, not a claim that authorising from token claims is wrong
@@ -68,10 +79,25 @@ Scenario: [labs/f06_stale_authorisation/scenario.py](../../labs/f06_stale_author
    inside the token's life.
 6. A BRAVO-only vendor presents a token whose claim names ALPHA.
 
-The resources measured are the two that only the engagement decision guards. The asset route is deliberately not one: its
-lookup re-checks the engagement in the same statement (the F-02 control), so it stays closed after a revocation in both
-variants (403 in the reference, 404 in the seeded variant, never the bytes). The lab does not add a second flaw to make the
-finding easier to see.
+The resources measured on the vendor path are the two that only the engagement decision guards. The asset route is
+deliberately not one: its lookup re-checks the engagement in the same statement (the F-02 control), so it stays closed after a
+revocation in both variants (403 in the reference, 404 in the seeded variant, never the bytes). The lab does not add a second
+flaw to make the finding easier to see.
+
+**The coordinator path** (steps 10 to 16 of the scenario's output; the same single seam, no second flaw).
+
+7. The ALPHA coordinator's own engagement is revoked, while a token it was issued a moment ago is still good. The lab has no
+   studio-administrator actor, so the coordinator revokes itself, which the reference allows; the mechanism is the same when
+   another coordinator does it.
+8. With that token, the revoked coordinator makes a 90-day ALPHA coordinator engagement for another subject. This is the
+   exploit of the second path, and the audit trail records it as an ordinary `engagement.created` by the revoked coordinator.
+9. From here the application is the reference in both runs (`labs.seam.restored` puts the reference function back for the
+   rest of the scenario; it installs nothing else). The revoked coordinator's token, still good, is refused; ten minutes later
+   it is a 401. The other subject, with a fresh token, asks for its ALPHA engagement and for ALPHA's unreleased asset, and the
+   reference answers from the database.
+
+The reference is not changed to make this work: the grant exists only because the seeded function ran once for one request.
+The second path is why the severity above is stated for both roles.
 
 ## 5. Corrected code
 
@@ -83,8 +109,10 @@ and capped.
 
 ### Remediation matrix
 
-[labs/f06_stale_authorisation/matrix.py](../../labs/f06_stale_authorisation/matrix.py) runs twenty attempts against four
-applications: the reference (R), the seeded variant (V), and two naive fixes. N1 checks the token again for validity and still
+[labs/f06_stale_authorisation/matrix.py](../../labs/f06_stale_authorisation/matrix.py) runs twenty-one attempts against four
+applications: the reference (R), the seeded variant (V), and two naive fixes. X9 is the coordinator path: it applies the
+variant's authorisation to the revoked coordinator's one request and judges what is left once the token has expired with the
+reference back in force. N1 checks the token again for validity and still
 believes its claim. N2 reads the engagement store on every request and honours a revocation but forgets that an engagement also
 ends. The boundary rows use an injected clock and the exact instants (one microsecond before the end date, the end date itself,
 one microsecond after); the T rows damage the token in the ways M0 lists (algorithm none, another key, another issuer or
@@ -101,12 +129,13 @@ X3   boundary    yes  NO   NO   NO   exactly at the end date (now = ends_at) the
 X4   boundary    yes  NO   NO   NO   one microsecond after the end date it is still over
 X6   boundary    yes  NO   NO   yes  a token whose claim names a higher role grants nothing: the role comes from the store
 X7   boundary    yes  yes  yes  yes  a delivery uploaded before the revocation cannot be sealed after it
+X9   exploit     yes  NO   NO   yes  a revoked coordinator's token, still good, leaves no grant behind: the subject it names has no access after the token expires
 T1   boundary    yes  yes  yes  yes  a token with the algorithm 'none' is a 401
 T5   boundary    yes  yes  yes  yes  an expired token is a 401
 T7   boundary    yes  yes  yes  yes  a valid vendor token with a coordinator's name in a header acts as the vendor
 R   fails: none  [as expected]
-V   fails: L4, X1, X2, X3, X4, X5, X6  [as expected]
-N1  fails: L4, X1, X2, X3, X4, X5, X6  [as expected]
+V   fails: L4, X1, X2, X3, X4, X5, X6, X9  [as expected]
+N1  fails: L4, X1, X2, X3, X4, X5, X6, X9  [as expected]
 N2  fails: X3, X4  [as expected]
 ```
 
@@ -116,7 +145,9 @@ re-checking it adds nothing. N2 does consult the store and is right on the first
 wrong at the end date and after it (X3, X4): only the exact-boundary rows tell it from the reference, and L5 shows that the
 last instant before the end date is still served. The seeded variant also fails L4, a legitimate row: it refuses a token that
 carries no claim, so its authority is the claim and not the engagement. The T rows hold in every variant, which is why F-06
-is a finding about authorisation and not about the verifier. The audit assertions are in
+is a finding about authorisation and not about the verifier. X9 separates the naive fixes by the coordinator path: N1 leaves
+the grant, and N2 does not, because a store read that honours the revocation refuses the revoked coordinator's request in the
+first place. The audit assertions are in
 `tests/findings/test_audit_assertions.py::test_a_revoked_vendors_denied_requests_are_recorded_with_who_where_and_why`.
 
 ## 6. Before and after results
@@ -135,6 +166,16 @@ Verbatim from [docs/evidence/f06.txt](../evidence/f06.txt) (lines elided with â€
   6. the vendor declares another delivery with that token
        -> 403; deliveries created after the revocation: 0
 â€¦
+  11. the revoked coordinator, with that same token, makes a 90-day ALPHA coordinator engagement for another subject
+       -> 403; engagements now held by that subject in ALPHA: 0
+  12. what the audit trail recorded for that request
+       -> access.denied denied (engagement_revoked), by coordinator-alpha-1
+â€¦
+  15. the other subject, with a fresh token, asks for its ALPHA engagement (the reference decides, from the database)
+       -> 403 Forbidden
+  16. it asks for ALPHA's unreleased asset
+       -> 403, never the bytes
+
 == SEEDED VARIANT (only the seam above is swapped)
   3. the SAME token still verifies, as the same subject
        -> signature, issuer, audience and times are good for vendor-alpha-1
@@ -146,16 +187,48 @@ Verbatim from [docs/evidence/f06.txt](../evidence/f06.txt) (lines elided with â€
        -> 201; deliveries created after the revocation: 1
   8. a vendor whose engagement ends in five minutes asks for it, then asks again 301 seconds later (past the end date, inside the token's life)
        -> 200, then 200
+â€¦
+  11. the revoked coordinator, with that same token, makes a 90-day ALPHA coordinator engagement for another subject
+       -> 201; engagements now held by that subject in ALPHA: 1
+  12. what the audit trail recorded for that request
+       -> engagement.created allowed, by coordinator-alpha-1
+  13. the reference is back in force; the revoked coordinator's token, still good, asks for its engagement
+       -> 403 Forbidden
+  14. ten minutes later the same token is used again
+       -> 401: the token has expired, so any window it gave is over
+  15. the other subject, with a fresh token, asks for its ALPHA engagement (the reference decides, from the database)
+       -> 200 coordinator
+  16. it asks for ALPHA's unreleased asset
+       -> 200, 4500 bytes
 
 RESULT     seeded variant exploited: YES   reference blocked: YES
 ```
 
+The two paths in one reading. On the vendor path the seeded decision serves a revoked vendor for as long as its token is good
+(steps 4 and 6). On the coordinator path the same decision, used once, leaves a row behind: after the token has expired (step
+14) and with the reference back in force (step 13), the subject the coordinator named is a coordinator of ALPHA by the
+database's own record and reads its unreleased asset (steps 15 and 16). The result line above is the vendor path's, which is
+the finding's exploit test; the coordinator path is asserted in
+`tests/findings/test_f06_stale_authorisation.py::test_the_enrolled_subject_keeps_legitimate_database_backed_access_after_the_window_and_after_the_fix`
+and in row X9 of the matrix.
+
 ## 7. Residual risk and assumptions
 
-- **The window is the token's life.** The reference caps a token at ten minutes (a lab assumption), so the staleness window of
-  the seeded variant here is at most ten minutes, not the twelve hours of the M0 narrative: the lab keeps authentication intact
-  in both variants rather than weaken it to lengthen the window. After the token expires the request is a 401 in both
-  (`tests/findings/test_f06_stale_authorisation.py::test_the_window_is_the_life_of_the_token_and_no_longer`).
+- **The window is the token's life; what is made in it is not bounded by it.** The reference caps a token at ten minutes (a lab
+  assumption), so the staleness window of the seeded variant here is at most ten minutes, not the twelve hours of the M0
+  narrative: the lab keeps authentication intact in both variants rather than weaken it to lengthen the window. After the
+  token expires the request is a 401 in both
+  (`tests/findings/test_f06_stale_authorisation.py::test_the_window_is_the_life_of_the_token_and_no_longer`). Ten minutes
+  bounds the exploitation, and it bounds the impact on the vendor path only. A grant made in the window by a coordinator is a
+  database row that lasts up to 90 days.
+- **A grant made in the window survives the fix.** Correcting the authoriser does not remove an engagement that was already
+  written. It ends at its own end date or when a coordinator revokes it; the audit trail names the revoked coordinator as the
+  creator, and the reference does not cascade a revocation to what the revoked coordinator granted (the same limit as
+  [TM-37](../threat-model.md)). Finding and revoking such rows is an operator's task that the lab does not automate.
+- **The revoker in the lab is a stand-in.** The lab has no studio-administrator actor, so the coordinator path revokes the
+  coordinator by its own call. The reference allows a coordinator to revoke any engagement in its production, itself included,
+  and has no last-coordinator safeguard (documented in M1F-3B); the mechanism being demonstrated is the same when another
+  coordinator revokes it.
 - A claim in the seeded variant is an authority: a token whose claim names a production it has no engagement in grants access
   to it (step 6). That is the same flaw, not a second one.
 - Revocation of the identity itself (disabling the account at the identity provider) is not modelled, and a token stays valid

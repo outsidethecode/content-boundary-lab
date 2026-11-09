@@ -19,10 +19,12 @@ Commands, each `python -m content_boundary_lab.runner <command> ...`:
     rescan       re-enter the gate for one delivery whose scan failed or whose verdict no longer counts (M1J)
     reconcile    finish or report what a crash left in quarantine and in trusted staging (M1H, M1K)
 
-Starting is all or nothing. The runner refuses, and does not serve, if the settings or the key set cannot be loaded or
-hold private key material, if the database is not the lab's, or if a storage root is not a directory (not a link) owned by
-the user running the lab and not writable by its group or by others. Parent directories are not examined: the trusted
-operator controls the places the lab keeps its data, and nothing here defends against someone who can write to them.
+Starting is all or nothing. The runner refuses, and does not serve, if the settings or the key set cannot be loaded, hold
+private key material, are a link, are not owned by the user running the lab or can be written by its group or by others
+(settings.py, on the descriptor it reads); if the database is not the lab's; or if a storage root is not a directory (not a
+link) owned by the user running the lab and not writable by its group or by others. Every command that is given both roots
+(init, serve, promote, reconcile) also refuses two roots that are not separate places. Parent directories are not examined:
+the trusted operator controls the places the lab keeps its data, and nothing here defends against someone who can write to them.
 
 The processes of one lab on one machine tell each other what they are doing through `quarantine.hold`: the server, a
 promotion and a rescan hold the quarantine root shared while they work; reconcile holds it exclusive, so it cannot run
@@ -48,7 +50,7 @@ from pathlib import Path
 from fastapi import FastAPI
 
 from content_boundary_lab import ingest, promotion, quarantine, scanner, store, trust
-from content_boundary_lab.app import Dependencies, create_app
+from content_boundary_lab.app import Dependencies, check_separate_roots, create_app
 from content_boundary_lab.clock import SystemClock
 from content_boundary_lab.settings import ConfigurationError, TrustedSettings, load_settings
 
@@ -93,6 +95,14 @@ def check_directory(path: Path, label: str) -> None:
     if not stat.S_ISDIR(info.st_mode):
         raise RunnerError(f"the {label} must be a directory, not a link or a file")
     _check_owner_and_mode(info, label)
+
+
+def check_roots(trusted: Path, quarantine: Path) -> None:
+    """Refuse two storage roots that are not separate places: the rule `serve` has always applied, now for every command."""
+    try:
+        check_separate_roots(trusted, quarantine)
+    except ValueError as error:
+        raise RunnerError(str(error)) from None
 
 
 def check_database(path: Path) -> None:
@@ -216,6 +226,7 @@ def _serve(arguments: argparse.Namespace, server: ServerFunction | None) -> int:
 def _init(arguments: argparse.Namespace, server: ServerFunction | None) -> int:
     check_directory(arguments.trusted_root, "trusted asset root")
     check_directory(arguments.quarantine_root, "quarantine root")
+    check_roots(arguments.trusted_root, arguments.quarantine_root)
     previous = os.umask(0o077)  # a new database is the user's alone from the first byte
     try:
         store.initialise_schema(arguments.database)
@@ -273,10 +284,17 @@ def _seed_demo(arguments: argparse.Namespace, server: ServerFunction | None) -> 
 
 
 def _ready(arguments: argparse.Namespace, *, trusted: bool = True) -> None:
-    """The places a command works in are as the lab assumes, before it takes the lock or touches anything."""
+    """The places a command works in are as the lab assumes, before it takes the lock or touches anything.
+
+    A command that is given both roots (promote, reconcile) must be given two separate places: a promotion into the zone it
+    reads untrusted bytes from, or a recovery that works across two spellings of one directory, is refused here, before the
+    lock, the database or any file is touched. `rescan` is given only the quarantine root, so there is no pair to confuse.
+    """
     if trusted:
         check_directory(arguments.trusted_root, "trusted asset root")
     check_directory(arguments.quarantine_root, "quarantine root")
+    if trusted:
+        check_roots(arguments.trusted_root, arguments.quarantine_root)
     check_database(arguments.database)
 
 

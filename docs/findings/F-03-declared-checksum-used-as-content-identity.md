@@ -5,7 +5,7 @@
 | | |
 |---|---|
 | Boundary | TB5: should these bytes be trusted? (the content-trust gate and its verdict cache) |
-| Severity (in-scenario, educational) | High |
+| Severity (in-scenario, educational) | Medium in this lab. The scan boundary is bypassed (demonstrated); the independent promotion control stops the bytes reaching trusted storage (also demonstrated). Not rated for any system that lacks that control |
 | Weakness | CWE-807 (Base); related CWE-348 (Use of Less Trusted Source). Not CWE-345: MITRE marks that Class "Discouraged" for mapping, even though OWASP Top 10:2025 A08 lists it |
 | ASVS 5.0.0 | 5.4.3 (L2, scan files from untrusted sources), 2.2.2 (L1, validate at a trusted service layer), 16.5.3 (L2, fail closed) |
 | Seam | `trust.content_identity`; the seeded twin is [labs/f03_declared_identity/vulnerable.py](../../labs/f03_declared_identity/vulnerable.py) |
@@ -24,9 +24,18 @@ the cache up with the checksum the vendor declared.
 clean file whose verdict is already cached (any file that was delivered and scanned in the ordinary way) and knows that file's
 SHA-256. ("Clean" here, and in the rest of this page, means only that the lab's synthetic scanner found no marker in it.) It forges nothing and breaks no signature.
 
-**Impact.** Content that was never scanned reaches `SCAN_PASSED` and is eligible for a coordinator's acceptance. **Not
-claimed:** that it reaches the trusted store. The reference promotion copies and hashes the bytes against the digest the
-coordinator accepted, and would refuse these (M0 Addendum R1; the last test of the file below shows it). F-03 is about where
+**Impact.** Two different things must be kept apart.
+
+- **The scan boundary is bypassed (demonstrated).** Content that was never scanned reaches `SCAN_PASSED` and is eligible for a
+  coordinator's acceptance. The coordinator is shown a `no_detection` verdict, and a sealed digest, that were made for other
+  bytes: the record of the trust decision is false.
+- **Trusted storage is not reached (also demonstrated, and not by this control).** The reference promotion copies the bytes,
+  hashes them as it writes them, compares that digest with the one the coordinator accepted, and refuses these (M0 Addendum
+  R1; the last test of the file below shows it). That control is independent of F-03, and it is why the severity above is
+  Medium in this lab: the realised harm is a false verdict and a delivery that can be accepted, not trusted content.
+
+**Not claimed:** that the bypassed bytes reach the trusted store, or that F-03 is exploitable end to end in this lab. How bad
+the false verdict would be in a system with no such control is not measured here, so it is not rated. F-03 is about where
 content identity comes from; F-04 is about verifying it at use, and the two stay separate.
 
 ## 2. Boundary

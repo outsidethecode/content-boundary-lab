@@ -25,6 +25,12 @@ def jwk(key: tokens.SigningKey) -> dict:
     }
 
 
+def case_alias(directory: Path) -> Path | None:
+    """The same directory under a name that differs only in letter case, or None where the filesystem keeps such names apart."""
+    swapped = directory.with_name(directory.name.swapcase())
+    return swapped if swapped != directory and swapped.is_dir() and os.path.samefile(swapped, directory) else None
+
+
 def private_directory(path: Path) -> Path:
     path.mkdir()
     os.chmod(path, 0o700)  # whatever the umask is
@@ -62,6 +68,8 @@ def make_area(directory: Path, *, keys: list[tokens.SigningKey] | None = None) -
     settings.write_text(
         f'issuer = "{tokens.ISSUER}"\naudience = "{tokens.AUDIENCE}"\njwks_path = "jwks.json"\n', encoding="utf-8"
     )
+    for trusted_file in (key_set, settings):
+        os.chmod(trusted_file, 0o644)  # readable by anyone, writable by its owner alone, whatever the umask is
     return Area(
         directory,
         keys[0],

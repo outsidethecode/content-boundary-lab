@@ -14,6 +14,7 @@ import time
 from hashlib import sha256
 
 import pytest
+from support.dev_area import case_alias
 from support.http_lab import CLEAN_FILE, make_lab  # noqa: F401  (make_lab is a fixture)
 from support.processes import other_process, run_runner
 from support.scanners import ScriptedScanner
@@ -238,3 +239,119 @@ def test_rescan_refuses_what_is_not_eligible_and_says_which_rule(world):
         done = world.rescan(argument)
         assert done.code == 3 and reason in done.err, (argument, done.err)
     assert world.delivery(delivery)["state"] == "SCAN_PASSED"
+
+
+# --- the two roots, as the lab assumes them, for every command that is given both (IR-02) ------------------------------------
+# `serve` has always refused roots that are one place, aliases of each other, or nested. The jobs that publish and recover
+# are given the same two roots and must refuse them the same way, before they take a lock, read a file or decide anything.
+
+
+def _inside_quarantine(world, tmp_path):
+    inner = world.quarantine / "trusted-inside"
+    inner.mkdir(mode=0o700)
+    return inner, world.quarantine
+
+
+def _inside_trusted(world, tmp_path):
+    inner = world.trusted / "quarantine-inside"
+    inner.mkdir(mode=0o700)
+    return world.trusted, inner
+
+
+def _one_directory(world, tmp_path):
+    return world.quarantine, world.quarantine
+
+
+def _through_a_link_to_the_parent(world, tmp_path):
+    alias = tmp_path / "alias"
+    alias.symlink_to(world.dev, target_is_directory=True)
+    return alias / "quarantine", world.quarantine  # a different spelling of the same directory; neither name is itself a link
+
+
+def _differing_only_in_letter_case(world, tmp_path):
+    alias = case_alias(world.quarantine)
+    if alias is None:
+        pytest.skip("this filesystem tells names that differ in letter case apart: there is no such alias to refuse")
+    return alias, world.quarantine
+
+
+BAD_ROOTS = {
+    "one directory for both": _one_directory,
+    "the trusted root inside quarantine": _inside_quarantine,
+    "quarantine inside the trusted root": _inside_trusted,
+    "two spellings of one directory, through a link": _through_a_link_to_the_parent,
+    "two spellings of one directory, differing in letter case": _differing_only_in_letter_case,
+}
+
+
+def snapshot(world: World, delivery: str) -> tuple:
+    """Everything a command could have changed: the delivery, the audit trail, and every path under the lab's area."""
+    return world.delivery(delivery), world.audit(), sorted(str(path) for path in world.dev.rglob("*"))
+
+
+def with_roots(world: World, command: str, trusted, quarantine, *rest: str):
+    return world.run(command, "--database", str(world.database), "--trusted-root", str(trusted), "--quarantine-root", str(quarantine), *rest)
+
+
+@pytest.mark.parametrize("layout", BAD_ROOTS.values(), ids=list(BAD_ROOTS))
+def test_promote_refuses_roots_that_are_not_separate_and_promotes_nothing(world, tmp_path, layout):
+    delivery = world.accepted(CLEAN_FILE)
+    trusted, quarantine = layout(world, tmp_path)
+    before = snapshot(world, delivery)
+    done = with_roots(world, "promote", trusted, quarantine, "--production-id", world.a, "--delivery-id", delivery)
+    assert done.code == runner.EXIT_CONFIGURATION and "separate" in done.err and done.result is None
+    assert snapshot(world, delivery) == before  # still ACCEPTED, no event, no promoting attempt, no staged file, no asset
+    assert world.delivery(delivery)["state"] == "ACCEPTED" and world.rows("SELECT * FROM assets WHERE delivery_id IS NOT NULL") == []
+
+
+@pytest.mark.parametrize("layout", BAD_ROOTS.values(), ids=list(BAD_ROOTS))
+def test_reconcile_refuses_roots_that_are_not_separate_and_recovers_nothing(world, tmp_path, layout):
+    delivery, promoting = half_promoted(world)  # PROMOTING, with a complete staged copy: the very thing reconcile would finish
+    trusted, quarantine = layout(world, tmp_path)
+    before = snapshot(world, delivery)
+    done = with_roots(world, "reconcile", trusted, quarantine, "--min-age-seconds", "0")
+    assert done.code == runner.EXIT_CONFIGURATION and "separate" in done.err and done.result is None
+    assert snapshot(world, delivery) == before
+    assert world.delivery(delivery)["state"] == "PROMOTING" and (world.trusted / ".staging" / promoting.attempt).exists()
+    assert world.reconcile().result["promotion"]["completed"] == [delivery]  # and the right roots still recover it
+
+
+# --- IR-03: a mistyped quarantine root looks like missing bytes, and is treated as such (TM-41) --------------------------------
+# These two tests state a limitation and do not fix it. Nothing persisted tells the lab which directory is its quarantine, so a
+# wrong but valid directory cannot be told from one whose files have gone, and M0's answer to missing bytes is a final
+# INTEGRITY_FAILED. No heuristic was invented; the README tells the operator how to check the root first.
+
+
+def test_a_mistyped_quarantine_root_is_missing_bytes_to_promote_and_the_delivery_ends_in_integrity_failed(world, tmp_path):
+    delivery = world.accepted(CLEAN_FILE)
+    wrong = tmp_path / "typo-quarantine"
+    wrong.mkdir(mode=0o700)
+    done = with_roots(world, "promote", world.trusted, wrong, "--production-id", world.a, "--delivery-id", delivery)
+    assert done.code == runner.EXIT_REFUSED and done.result["state"] == "INTEGRITY_FAILED"
+    assert world.events(delivery)[-1][0] == "delivery.integrity_failed" and world.events(delivery)[-1][-1] == "sealed_content_changed"
+    assert world.stored(delivery).read_bytes() == CLEAN_FILE  # the bytes were never gone
+    again = world.promote(world.a, delivery)  # with the right root now: no arrow leaves INTEGRITY_FAILED
+    assert again.code == runner.EXIT_REFUSED and "state_conflict" in again.err and files_under(world.trusted) == []
+
+
+def test_a_mistyped_quarantine_root_fails_a_promotion_that_reconcile_would_have_finished(world, tmp_path):
+    delivery, _ = half_promoted(world)
+    wrong = tmp_path / "typo-quarantine"
+    wrong.mkdir(mode=0o700)
+    done = with_roots(world, "reconcile", world.trusted, wrong, "--min-age-seconds", "0")
+    assert done.code == 0 and done.result["promotion"]["failed"] == [delivery]
+    assert world.delivery(delivery)["state"] == "INTEGRITY_FAILED"
+
+
+def files_under(root) -> list[str]:
+    return sorted(str(path.relative_to(root)) for path in root.rglob("*") if path.is_file())
+
+
+def test_rescan_is_given_one_root_so_there_is_no_pair_to_confuse():
+    parser_help = run_runner("rescan", "--help").stdout
+    assert "--quarantine-root" in parser_help and "--trusted-root" not in parser_help
+
+
+def test_roots_that_are_separate_still_work_for_both_jobs(world):
+    delivery = world.accepted(CLEAN_FILE)
+    assert world.promote(world.a, delivery).code == 0 and world.reconcile().code == 0

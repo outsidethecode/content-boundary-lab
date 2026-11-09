@@ -14,7 +14,7 @@ from cryptography.hazmat.primitives.asymmetric import ec
 from content_boundary_lab import authz
 from labs.f06_stale_authorisation import SEAM, naive
 from labs.matrix import Matrix, Row, Variant
-from labs.seam import seam
+from labs.seam import restored, seam
 from labs.world import ISSUER, KID, T0, World
 
 ENDS = T0 + timedelta(seconds=300)  # the short vendor's engagement ends exactly here
@@ -72,6 +72,24 @@ def _x8(w):
     return w.call("GET", f"/productions/{w.production['bravo']}/engagement", "alpha_vendor").status == 403
 
 
+def _x9(w):
+    """IR-11: a coordinator revoked while its token is good must not leave a grant behind that outlives the token.
+
+    The row runs under the variant's authoriser for the revoked coordinator's one request. The follow-up is judged with the
+    reference back in force (`restored`), because the grant is a database row and the reference honours any row it finds.
+    """
+    alpha = w.production["alpha"]
+    token = w.token("alpha_coordinator")
+    assert w.revoke("alpha_coordinator", "alpha", "alpha_coordinator").status == 200
+    w.clock.advance(60)
+    ends_at = (w.clock.now() + timedelta(days=90)).strftime("%Y-%m-%dT%H:%M:%SZ")
+    w.call("POST", f"/productions/{alpha}/engagements", token=token, json={"subject": w.subject("bravo_vendor"), "role": "coordinator", "ends_at": ends_at})
+    w.clock.advance(601)  # the token has expired: whatever the window allowed is over
+    with restored(SEAM):
+        later = w.call("GET", f"/productions/{alpha}/engagement", "bravo_vendor")
+    return later.status == 403
+
+
 def _claimless(w):
     return _get(w, None, token=w.token("alpha_vendor", claims={"productions": {}})).status == 200
 
@@ -111,6 +129,7 @@ ROWS = (
     Row("X6", "boundary", "a token whose claim names a higher role grants nothing: the role comes from the store", _x6),
     Row("X7", "boundary", "a delivery uploaded before the revocation cannot be sealed after it", _x7),
     Row("X8", "boundary", "an ALPHA vendor's valid token is refused on the BRAVO production", _x8, False),
+    Row("X9", "exploit", "a revoked coordinator's token, still good, leaves no grant behind: the subject it names has no access after the token expires", _x9),
     Row("T1", "boundary", "a token with the algorithm 'none' is a 401", _tampered(_none_algorithm), False),
     Row("T2", "boundary", "a token signed by another key is a 401", _tampered(lambda w: w.token("alpha_vendor", key=ec.generate_private_key(ec.SECP256R1()))), False),
     Row("T3", "boundary", "a token from another issuer is a 401", _tampered(lambda w: w.token("alpha_vendor", claims={"iss": "https://other.example"})), False),
@@ -131,8 +150,8 @@ def build() -> Matrix:
         ROWS,
         (
             Variant("R", "the reference"),
-            Variant("V", "the seeded variant (labs/f06_stale_authorisation/vulnerable.py)", (SEAM,), frozenset({"L4", "X1", "X2", "X3", "X4", "X5", "X6"}), "authorises from the token's claim: revocation, the end date and the role all come from the past, and a token with no claim is refused"),
-            Variant("N1", "naive fix: the token is checked again for validity; the claim is still believed", (jwt_only,), frozenset({"L4", "X1", "X2", "X3", "X4", "X5", "X6"}), "the same rows as the seeded variant: a valid signature and an unexpired token do not show that a granted engagement is still active"),
+            Variant("V", "the seeded variant (labs/f06_stale_authorisation/vulnerable.py)", (SEAM,), frozenset({"L4", "X1", "X2", "X3", "X4", "X5", "X6", "X9"}), "authorises from the token's claim: revocation, the end date and the role all come from the past, a token with no claim is refused, and a revoked coordinator can still make a grant that outlives the token (X9)"),
+            Variant("N1", "naive fix: the token is checked again for validity; the claim is still believed", (jwt_only,), frozenset({"L4", "X1", "X2", "X3", "X4", "X5", "X6", "X9"}), "the same rows as the seeded variant: a valid signature and an unexpired token do not show that a granted engagement is still active"),
             Variant("N2", "naive fix: the store is read each request and revocation is checked, the end date is not", (store_without_end,), frozenset({"X3", "X4"}), "right on the first request after a revocation and wrong from the end date on: only the exact-boundary rows tell"),
         ),
     )

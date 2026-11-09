@@ -104,6 +104,14 @@ def no_network(monkeypatch):
         monkeypatch.setattr(socket, name, refuse)
 
 
+@pytest.fixture(autouse=True)
+def ordinary_umask():
+    """The loader refuses a file the group or others can write, so these tests make theirs under the usual umask, not the shell's."""
+    previous = os.umask(0o022)
+    yield
+    os.umask(previous)
+
+
 # --- a valid configuration loads ---------------------------------------------------------------------------------
 
 
@@ -650,6 +658,114 @@ def test_environment_variables_cannot_change_the_result(tmp_path, monkeypatch):
         monkeypatch.setenv(name, "https://environment.example/override")
     loaded = load_settings(path)
     assert (loaded.issuer, loaded.audience) == (ISSUER, AUDIENCE)
+
+
+# --- the files are as the operator left them (IR-04) --------------------------------------------------------------
+# The key set decides who may sign in as whom, so what matters is that nobody else can change it. Public keys are not
+# secret: a file anyone can read is fine, a file anyone can write is not. The check is made on the descriptor that is read.
+
+BOTH_FILES = ["settings.toml", "jwks.json"]
+SETTINGS_FILE_NAMES = {"settings.toml": "settings file", "jwks.json": "key set file"}
+
+
+def _owned_by_someone_else(monkeypatch, target: Path) -> None:
+    """Make `target` look, to the loader's fstat, as if another user owned it (a real chown needs root)."""
+    inode, real = os.stat(target).st_ino, os.fstat
+
+    def fstat(descriptor):
+        info = real(descriptor)
+        if info.st_ino != inode:
+            return info
+        fields = list(info)
+        fields[4] = info.st_uid + 1
+        return os.stat_result(fields)
+
+    monkeypatch.setattr(os, "fstat", fstat)
+
+
+def _swap_at_open(monkeypatch, path: Path, replacement: Path, *, after: bool) -> None:
+    """Put `replacement` at `path` just before (or just after) the loader opens `path`: what a local attacker with a
+    writable directory could do between any check on a name and the use of that name."""
+    real, done = os.open, []
+
+    def open_(name, *args, **kwargs):
+        if not after and not done and os.fspath(name) == os.fspath(path):
+            done.append(True)
+            os.replace(replacement, path)
+        descriptor = real(name, *args, **kwargs)
+        if after and not done and os.fspath(name) == os.fspath(path):
+            done.append(True)
+            os.replace(replacement, path)
+        return descriptor
+
+    monkeypatch.setattr(os, "open", open_)
+
+
+@pytest.mark.parametrize("mode", [0o620, 0o602, 0o660, 0o606, 0o666, 0o777], ids=oct)
+@pytest.mark.parametrize("name", BOTH_FILES)
+def test_a_file_the_group_or_others_can_write_is_refused(tmp_path, name, mode):
+    path = _write(tmp_path)
+    os.chmod(tmp_path / name, mode)
+    with pytest.raises(ConfigurationError, match=f"the {SETTINGS_FILE_NAMES[name]} must not be writable by its group or by others"):
+        load_settings(path)
+
+
+@pytest.mark.parametrize("mode", [0o644, 0o640, 0o600, 0o444, 0o400], ids=oct)
+def test_public_keys_need_integrity_and_not_secrecy_so_a_readable_file_is_accepted(tmp_path, mode):
+    path = _write(tmp_path)
+    for name in BOTH_FILES:
+        os.chmod(tmp_path / name, mode)
+    assert list(load_settings(path).public_keys) == ["key-1"]
+
+
+@pytest.mark.parametrize("name", BOTH_FILES)
+def test_a_file_owned_by_another_user_is_refused(tmp_path, monkeypatch, name):
+    path = _write(tmp_path)
+    _owned_by_someone_else(monkeypatch, tmp_path / name)
+    with pytest.raises(ConfigurationError, match=f"the {SETTINGS_FILE_NAMES[name]} must be owned by the user running the lab"):
+        load_settings(path)
+
+
+@pytest.mark.parametrize("name", BOTH_FILES)
+def test_a_symbolic_link_in_place_of_either_file_is_refused(tmp_path, name):
+    path = _write(tmp_path)
+    (tmp_path / name).rename(tmp_path / f"real-{name}")
+    (tmp_path / name).symlink_to(tmp_path / f"real-{name}")
+    with pytest.raises(ConfigurationError, match=f"the {SETTINGS_FILE_NAMES[name]} must not be a symbolic link"):
+        load_settings(path)
+
+
+@pytest.mark.parametrize("name", BOTH_FILES)
+def test_a_name_that_is_changed_just_before_it_is_opened_is_judged_by_the_file_that_was_opened(tmp_path, monkeypatch, name):
+    """A check on the name, then an open of the name, could be given a different file in between. The file read here is the
+    file whose owner and mode were looked at: the unsafe substitute is refused, not read."""
+    path = _write(tmp_path)
+    substitute = tmp_path / "substitute"
+    substitute.write_bytes((tmp_path / name).read_bytes())
+    os.chmod(substitute, 0o666)  # what an attacker would leave behind: the same content, writable by anyone
+    _swap_at_open(monkeypatch, tmp_path / name, substitute, after=False)
+    with pytest.raises(ConfigurationError, match="must not be writable"):
+        load_settings(path)
+
+
+@pytest.mark.parametrize("name", BOTH_FILES)
+def test_a_name_that_is_changed_just_after_it_is_opened_does_not_change_what_is_read(tmp_path, monkeypatch, name):
+    path = _write(tmp_path)
+    other = _jwks(_jwk("substitute")) if name == "jwks.json" else _config_text(issuer=_toml_string("https://other.example"))
+    substitute = tmp_path / "substitute"
+    substitute.write_text(other)
+    os.chmod(substitute, 0o666)
+    _swap_at_open(monkeypatch, tmp_path / name, substitute, after=True)
+    loaded = load_settings(path)  # the file that was opened was fine, and it is the one that was read
+    assert list(loaded.public_keys) == ["key-1"] and loaded.issuer == ISSUER
+
+
+def test_the_message_for_an_unsafe_file_names_the_file_and_not_its_content(tmp_path):
+    path = _write(tmp_path)
+    os.chmod(tmp_path / "jwks.json", 0o666)
+    with pytest.raises(ConfigurationError) as caught:
+        load_settings(path)
+    assert "key-1" not in str(caught.value) and ISSUER not in str(caught.value) and len(str(caught.value)) < 120
 
 
 # --- error messages ----------------------------------------------------------------------------------------------

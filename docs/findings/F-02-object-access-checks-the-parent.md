@@ -23,8 +23,16 @@ protection: ids leak through logs, shared manifests and links.
 **Attacker capability.** An authenticated vendor with a genuine, current engagement in ALPHA and nothing else. It knows the id
 of an unreleased BRAVO asset and can send HTTP requests to the application. It forges nothing and breaks no signature.
 
-**Impact.** Cross-production reads of unreleased content: the headline risk of the scenario. Reading changes nothing, so the
-impact is confidentiality only.
+**Impact.** Two different things go wrong, and they should not be run together. Reading changes nothing, so both are about
+reads.
+
+- **A confidentiality loss, for a caller who is not entitled to the asset.** A vendor or a coordinator engaged only in ALPHA
+  reads BRAVO's unreleased asset: cross-production disclosure of unreleased content, the headline risk of the scenario.
+- **A wrong production binding, for a caller who is entitled to it anyway.** A caller engaged in both productions already
+  has the right to read BRAVO's asset. Reached through the ALPHA url the read returns nothing it could not have had, so it
+  discloses nothing beyond its entitlement. What breaks is the binding between the url and the asset's owner: the decision is
+  made under the wrong production's engagement and role, and the audit trail records BRAVO's asset as a read in ALPHA (and with
+  it any rule, report or alert keyed on the production of a request).
 
 ## 2. Boundary
 
@@ -67,10 +75,12 @@ match is one and the same 404, whether the asset is missing, belongs elsewhere o
 `access.denied` (`not_found_or_forbidden`). Tokens, roles and the engagement on the URL's production are checked first, as in
 both variants.
 
-**A naive fix does not do this.** Checking only "is the caller engaged where the asset lives?" repairs the headline case and
-leaves the caller who is engaged in both productions able to read BRAVO's asset through ALPHA's url: the relationship between
-the URL and the asset's owner is not enforced.
-`tests/findings/test_f02_object_scope.py::test_a_naive_fix_that_checks_the_assets_own_production_but_not_the_url_still_leaks_to_a_caller_engaged_in_both`
+**A naive fix does not do this.** Checking only "is the caller engaged where the asset lives?" repairs the headline case (no
+caller can now read an asset of a production it is not engaged in) and still serves BRAVO's asset through ALPHA's url to a
+caller engaged in both. That read is not a disclosure, because the caller is entitled to the asset; it is a wrong binding: the
+relationship between the URL and the asset's owner is not enforced, so the read is authorised and recorded under the wrong
+production.
+`tests/findings/test_f02_object_scope.py::test_a_naive_fix_that_checks_the_assets_own_production_but_not_the_url_still_binds_the_asset_to_the_wrong_production_for_a_caller_engaged_in_both`
 shows it.
 
 ### Remediation matrix
@@ -134,8 +144,10 @@ RESULT     seeded variant exploited: YES   reference blocked: YES
 ```
 
 In the seeded variant the audit trail records BRAVO's asset as an ordinary read in ALPHA: the read is real and its attribution
-is wrong. For the caller engaged in both productions the data was reachable anyway; what the flaw breaks is the binding
-between the URL and the asset's owner (and with it any rule, report or alert keyed on the production of a request).
+is wrong. Steps 2 and 9 (a vendor, and a coordinator, engaged only in ALPHA) are confidentiality losses: those callers had no
+right to the bytes. Step 7 (a caller engaged in both productions) is not: the data was reachable anyway, and what the flaw
+breaks is the binding between the URL and the asset's owner (and with it any rule, report or alert keyed on the production of
+a request).
 
 ## 7. Residual risk and assumptions
 

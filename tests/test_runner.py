@@ -137,6 +137,30 @@ def _no_keys_member(area):
     area.key_set.write_text("{}", encoding="utf-8")
 
 
+def _settings_anyone_can_write(area):
+    os.chmod(area.settings, 0o666)
+
+
+def _key_set_anyone_can_write(area):
+    os.chmod(area.key_set, 0o666)
+
+
+def _key_set_the_group_can_write(area):
+    os.chmod(area.key_set, 0o664)
+
+
+def _settings_that_are_a_link(area):
+    real = area.directory / "real-settings.toml"
+    area.settings.rename(real)
+    area.settings.symlink_to(real)
+
+
+def _key_set_that_is_a_link(area):
+    real = area.directory / "real-jwks.json"
+    area.key_set.rename(real)
+    area.key_set.symlink_to(real)
+
+
 NO_KEY = {
     "no settings file": _drop_settings,
     "no key set file": _drop_key_set,
@@ -145,6 +169,11 @@ NO_KEY = {
     "a key set with private key material": _private_key_material,
     "a key set fetched from a URL": _key_set_from_a_url,
     "a key set with no keys": _no_keys_member,
+    "a settings file anyone can write": _settings_anyone_can_write,
+    "a key set anyone can write": _key_set_anyone_can_write,
+    "a key set the group can write": _key_set_the_group_can_write,
+    "a settings file that is a symbolic link": _settings_that_are_a_link,
+    "a key set that is a symbolic link": _key_set_that_is_a_link,
 }
 
 
@@ -268,7 +297,18 @@ def test_a_storage_root_that_is_not_as_the_lab_assumes_is_refused_and_not_served
 
 
 def test_a_root_owned_by_someone_else_is_refused(area, monkeypatch):
-    monkeypatch.setattr(runner.os, "geteuid", lambda: os.stat(area.trusted).st_uid + 1)
+    """Only the root looks foreign: faking the running user for the whole process would also fail the settings file first."""
+    real = os.lstat
+
+    def lstat(path, *args, **kwargs):
+        info = real(path, *args, **kwargs)
+        if os.fspath(path) != os.fspath(area.trusted):
+            return info
+        fields = list(info)
+        fields[4] = info.st_uid + 1
+        return os.stat_result(fields)
+
+    monkeypatch.setattr(runner.os, "lstat", lstat)
     with pytest.raises(runner.RunnerError, match="owned by the user"):
         composed(area)
 
@@ -505,6 +545,18 @@ def test_init_checks_the_roots_before_it_creates_the_database(tmp_path):
     assert not made.database.exists()
 
 
+@pytest.mark.parametrize("layout", ["one directory for both", "the trusted root inside quarantine"])
+def test_init_refuses_roots_that_are_not_separate_before_it_creates_the_database(tmp_path, layout):
+    made = make_area(tmp_path)
+    inner = made.quarantine / "trusted-inside"
+    inner.mkdir(mode=0o700)
+    trusted = made.quarantine if layout == "one directory for both" else inner
+    before = made.tree()
+    arguments = ["init", "--database", str(made.database), "--trusted-root", str(trusted), "--quarantine-root", str(made.quarantine)]
+    assert runner.main(arguments) == runner.EXIT_CONFIGURATION
+    assert not made.database.exists() and made.tree() == before
+
+
 def seeded(area: Area, capsys) -> dict:
     assert runner.main(["seed-demo", "--settings", str(area.settings), "--database", str(area.database)]) == runner.EXIT_OK
     return json.loads(capsys.readouterr().out)
@@ -543,6 +595,19 @@ def test_seed_demo_refuses_a_database_that_already_has_a_production_and_changes_
 
 def test_seed_demo_without_trusted_settings_writes_nothing(area):
     area.key_set.unlink()
+    before = area.database.read_bytes()
+    code = runner.main(["seed-demo", "--settings", str(area.settings), "--database", str(area.database)])
+    assert code == runner.EXIT_CONFIGURATION and area.database.read_bytes() == before
+
+
+@pytest.mark.parametrize(
+    "damage",
+    [value for name, value in NO_KEY.items() if "write" in name or "link" in name],
+    ids=[name for name in NO_KEY if "write" in name or "link" in name],
+)
+def test_seed_demo_with_authentication_files_anyone_could_have_changed_writes_nothing(area, damage):
+    """It reads the same trusted settings the server does, and it enrols the subjects those settings' issuer will vouch for."""
+    damage(area)
     before = area.database.read_bytes()
     code = runner.main(["seed-demo", "--settings", str(area.settings), "--database", str(area.database)])
     assert code == runner.EXIT_CONFIGURATION and area.database.read_bytes() == before
