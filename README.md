@@ -1,16 +1,41 @@
 # Content Boundary Lab
 
-An educational laboratory for security code review and remediation: a small service in which an outside vendor
-delivers a file to a film or television production, with four deliberately planted flaws that you can reproduce, read and
-see corrected. It is not affiliated with, endorsed by or sponsored by any company, standards body or product.
+> **v0.1 — Educational Preview / Work in Progress.** Verified on macOS ARM64 and CPython 3.13 only; no independent human
+> review yet; one limitation open ([M4-01](docs/review/m4-findings.md)). [Limitations](#limitations-and-non-goals).
+
+A security code-review lab: a service where an outside vendor delivers a file to a film or television production. Four
+planted flaws, one function each, are reproduced as working exploits and then blocked by the corrected reference
+application, so flaw and fix can be read side by side. It is not affiliated with, endorsed by or sponsored by any
+company, standards body or product.
 
 > **`labs/` contains intentionally vulnerable code. The default application does not**, and no switch, option or setting selects
 > any of it. Every vulnerability here is deliberately constructed for education; none is a discovery in any third-party system.
 
-**The problem, as three questions.** Every request is judged by three decisions that real failures in this area tend to blur
-together: *who are you* (a verified signed token), *what may you touch* (an engagement looked up on every request, in the
-production the URL names), and *should these bytes be trusted* (decided from the bytes the server itself read and hashed,
-never from what the sender declared). Each finding below breaks one of them, in one function.
+Verified output ([summary.txt](docs/evidence/summary.txt); `python -m labs` itself ends with the last line):
+
+<!-- evidence: docs/evidence/summary.txt -->
+```text
+F-02  seeded variant exploited and reference blocked: YES  (Object access checks the parent, not the child)
+F-03  seeded variant exploited and reference blocked: YES  (Caller-declared checksum used as content identity)
+F-04  seeded variant exploited and reference blocked: YES  (Promotion trusts a mutable reference, not the accepted bytes)
+F-06  seeded variant exploited and reference blocked: YES  (Authorisation snapshot in a long-lived token)
+
+4 exploits reproduced against the seeded variants; 4 blocked by the reference (4 findings).
+```
+
+| Finding | Boundary | Severity (in-scenario, educational) | CWE | ASVS 5.0.0 | Code | Tests | Evidence |
+|---|---|---|---|---|---|---|---|
+| **F-02** Object access checks the parent, not the child | TB3 | High | 639 | 8.2.2, 8.4.1 | [twin](labs/f02_parent_check/vulnerable.py), [fix](src/content_boundary_lab/assets.py) | [tests](tests/findings/test_f02_object_scope.py) | [f02](docs/evidence/f02.txt) |
+| **F-03** Caller-declared checksum used as content identity | TB5 | Medium here: scan bypassed; promotion refuses the bytes | 807 | 5.4.3, 2.2.2, 16.5.3 | [twin](labs/f03_declared_identity/vulnerable.py), [fix](src/content_boundary_lab/trust.py) | [tests](tests/findings/test_f03_declared_identity.py) | [f03](docs/evidence/f03.txt) |
+| **F-04** Promotion trusts a mutable reference, not the accepted bytes | TB4 | High if quarantine is writable after the seal | 367 | 15.4.2, 2.3.1, 2.3.3 | [twin](labs/f04_unverified_promotion/vulnerable.py), [fix](src/content_boundary_lab/promotion.py) | [tests](tests/findings/test_f04_unverified_promotion.py) | [f04](docs/evidence/f04.txt) |
+| **F-06** Authorisation snapshot in a long-lived token | TB3 | High for a coordinator (a grant of up to 90 days from a 10-minute token); Medium for a vendor | 863 | 8.3.2, 7.4.2 | [twin](labs/f06_stale_authorisation/vulnerable.py), [fix](src/content_boundary_lab/authz.py) | [tests](tests/findings/test_f06_stale_authorisation.py) | [f06](docs/evidence/f06.txt) |
+
+Passing tests show only that each seeded defect is reproducible and the corrected code blocks it, under the stated
+assumptions. [Write-ups](#the-findings) below.
+
+**Three questions.** Every request turns on *who are you* (a verified signed token), *what may you touch* (an engagement
+looked up each time, in the production the URL names) and *should these bytes be trusted* (decided from bytes the server
+hashed, never from what the sender declared). Each finding breaks one, in one function.
 
 ```mermaid
 flowchart LR
@@ -24,23 +49,14 @@ flowchart LR
   T -- "same checks on every read" --> B
 ```
 
-| Finding | Boundary | Severity (in-scenario, educational) | CWE | ASVS 5.0.0 | Code | Tests | Evidence |
-|---|---|---|---|---|---|---|---|
-| **F-02** Object access checks the parent, not the child | TB3 | High | 639 | 8.2.2, 8.4.1 | [twin](labs/f02_parent_check/vulnerable.py), [fix](src/content_boundary_lab/assets.py) | [tests](tests/findings/test_f02_object_scope.py) | [f02](docs/evidence/f02.txt) |
-| **F-03** Caller-declared checksum used as content identity | TB5 | Medium here: the scan is bypassed, and independent promotion keeps the bytes out of trusted storage | 807 | 5.4.3, 2.2.2, 16.5.3 | [twin](labs/f03_declared_identity/vulnerable.py), [fix](src/content_boundary_lab/trust.py) | [tests](tests/findings/test_f03_declared_identity.py) | [f03](docs/evidence/f03.txt) |
-| **F-04** Promotion trusts a mutable reference, not the accepted bytes | TB4 | High if quarantine is writable after the seal | 367 | 15.4.2, 2.3.1, 2.3.3 | [twin](labs/f04_unverified_promotion/vulnerable.py), [fix](src/content_boundary_lab/promotion.py) | [tests](tests/findings/test_f04_unverified_promotion.py) | [f04](docs/evidence/f04.txt) |
-| **F-06** Authorisation snapshot in a long-lived token | TB3 | High for a coordinator (an unauthorised engagement of up to 90 days from a token of at most ten minutes); Medium for a vendor | 863 | 8.3.2, 7.4.2 | [twin](labs/f06_stale_authorisation/vulnerable.py), [fix](src/content_boundary_lab/authz.py) | [tests](tests/findings/test_f06_stale_authorisation.py) | [f06](docs/evidence/f06.txt) |
-
-Passing tests show that the seeded defect is reproducible and that the corrected code blocks it under the stated assumptions;
-they show nothing more. Write-ups: [F-02](docs/findings/F-02-object-access-checks-the-parent.md),
-[F-03](docs/findings/F-03-declared-checksum-used-as-content-identity.md),
-[F-04](docs/findings/F-04-promotion-trusts-a-mutable-reference.md),
-[F-06](docs/findings/F-06-authorisation-snapshot-in-a-long-lived-token.md).
-
 ## Quick start
 
-Verified for CPython 3.13.7 on macOS arm64 only (see [Limitations](#limitations-and-non-goals)). Three commands, then the
-demonstrations:
+> **Requires macOS on Apple silicon (ARM64) and CPython 3.13.** The locked environment and every result here were verified on
+> CPython 3.13.7 on macOS arm64 and nowhere else. On Linux, Windows, Intel Macs or Python 3.12 the hash-checked install is
+> expected to be refused, and nothing is claimed for them ([Limitations](#limitations-and-non-goals)). Without that machine
+> you can still read the [evidence](docs/evidence/summary.txt) and the [finding write-ups](#the-findings).
+
+Three commands, then the demonstrations:
 
 ```bash
 python3 -m venv .venv
@@ -255,7 +271,7 @@ its control and the tests for it, or marked as a limitation or out of scope. The
 
 - **One tested platform.** `requirements.lock` is verified for CPython 3.13.7 on macOS arm64. Linux and Python 3.12 are not verified, and the hash check refuses them until each has its own lock.
 - **No independent review yet.** Three AI reviews, each in a context of its own and of the same model family as the author, are in [docs/review/](docs/review/m4-findings.md). They are an internal check, not an independent one. A human reviewer has not read the code (decision D10 is pending).
-- **Accepted limits.** Promotion does not look at anything that happened after an acceptance (a revocation, an expired verdict, a later detection of the same bytes); the verdict cache is shared across productions; the lab makes no confidentiality claim against another local account and no defence against a party who can write its storage; a vendor's file name, extension included, is the name of the download and is not compared with the detected file signature or the declared type, and the coordinator is not shown it when accepting ([TM-40](docs/threat-model.md)); a wrong quarantine root looks like missing bytes ([TM-41](docs/threat-model.md)). Each is in the threat model and the [M4 register](docs/review/m4-findings.md) or the [follow-up record](docs/fresh-assessment-followup.md).
+- **Accepted limits.** Promotion does not look at anything that happened after an acceptance (a revocation, an expired verdict, a later detection of the same bytes), and an acceptance cannot be withdrawn: [M4-01](docs/review/m4-findings.md), open at Medium, accepted and not resolved; the verdict cache is shared across productions; the lab makes no confidentiality claim against another local account and no defence against a party who can write its storage; a vendor's file name, extension included, is the name of the download and is not compared with the detected file signature or the declared type, and the coordinator is not shown it when accepting ([TM-40](docs/threat-model.md)); a wrong quarantine root looks like missing bytes ([TM-41](docs/threat-model.md)). Each is in the threat model and the [M4 register](docs/review/m4-findings.md) or the [follow-up record](docs/fresh-assessment-followup.md).
 - **Synthetic parts.** The scanner, the identity provider and the object stores are stand-ins. The server listens on `127.0.0.1` with no TLS and is for local study.
 - **Not built.** F-01 and F-05, a withdrawal for accepted content, a threat feed, a takedown after promotion, cloud storage, a front end.
 - **Continuous integration** is written ([`.github/workflows/ci.yml`](.github/workflows/ci.yml)) and its text is checked by a guard test; it has not run anywhere.
