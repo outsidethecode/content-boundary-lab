@@ -74,7 +74,7 @@ The run ends with:
 
 Each demonstration builds a throwaway synthetic world, runs the attacker's steps against the reference and against the
 reference with only one function swapped, prints both, and exits 0 only if the seeded variant was exploited and the reference
-blocked it. The [tour](docs/tour.md) shows each finding as context, flaw, attack, fix and result. A
+blocked it. The [tour](docs/tour.md), also [as a web page](https://outsidethecode.github.io/content-boundary-lab/), shows each finding as context, flaw, attack, fix and result. A
 [walkthrough](docs/walkthrough.md) takes you through the rest: the remediation matrices, one finding from write-up to code, and one
 delivery through a real local server.
 
@@ -318,7 +318,7 @@ To check the documents against the repository, run `.venv/bin/python tools/check
 
 ## Documentation
 
-- [Tour](docs/tour.md): the four findings in the same five steps each (context, planted flaw, attack, fix, result), with the real output.
+- [Tour](docs/tour.md): the four findings in the same five steps each (context, planted flaw, attack, fix, result), with the real output. The same tour is [a web page](https://outsidethecode.github.io/content-boundary-lab/) (source: [`docs/index.html`](docs/index.html)).
 - [Walkthrough](docs/walkthrough.md): install, the four findings, one finding from write-up to code, one delivery through a real local server, and how to verify and regenerate the evidence.
 - [Architecture](docs/architecture.md): the pieces, the request flow, the delivery lifecycle, where bytes live, and what the database refuses on its own.
 - [Threat model](docs/threat-model.md): actors, trust boundaries, and every threat with its control and the tests for it, or marked as a limitation or out of scope.
