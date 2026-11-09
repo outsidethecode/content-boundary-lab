@@ -1,6 +1,6 @@
 # Static analysis, dependency audit and secret scan (M4)
 
-Run on 2026-11-04 against the committed tree at `a015bc5` (M3). The tools ran from a disposable environment outside the
+Run on 2026-11-04 against the committed tree at `3066341` (M3). The tools ran from a disposable environment outside the
 repository; none was added to `pyproject.toml` or `requirements.lock`, and the runtime lock was not changed. Nothing in the
 repository was uploaded anywhere. The one network use was `pip-audit`, which sends **package names and versions** (not
 source) to the PyPI vulnerability service; the lock installs in section 3 fetched the already-locked wheels from PyPI as the
@@ -217,8 +217,8 @@ section 6).
 
 ## 7. Addendum at M5: the dependency audit and the secret scan repeated (2026-11-05)
 
-Run on the tree that became the M5 implementation commit: the committed `b5982c3` plus the M5 files, with `src/`,
-`requirements.lock`, `pyproject.toml` and `MANIFEST.in` identical to `b5982c3`. The tools and versions are those of M4
+Run on the tree that became the M5 implementation commit: the committed `dd4c006` plus the M5 files, with `src/`,
+`requirements.lock`, `pyproject.toml` and `MANIFEST.in` identical to `dd4c006`. The tools and versions are those of M4
 (pip-audit 2.10.1, detect-secrets 1.5.0, from the same disposable environment outside the repository). Package names and
 versions went to the PyPI vulnerability service; no source went anywhere. No tool configuration or dependency was added.
 

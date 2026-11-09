@@ -94,7 +94,7 @@ Any change to `src/`, `labs/` or `tests/` means the FINAL evidence in `docs/evid
 checkout, and `python tools/check_docs.py --final` will say so once the change is committed. This pass regenerated **two** files
 so that the finding page quotes real output, and they say `PROVISIONAL`: `f06.txt` and `f06-matrix.txt` (their content
 changed). The other seven (`f02.txt`, `f03.txt`, `f04.txt`, `f02-matrix.txt`, `f03-matrix.txt`, `f04-matrix.txt`,
-`summary.txt`) are byte-for-byte what they were; they still name the older commit `7f90139` and are stale as FINAL evidence
+`summary.txt`) are byte-for-byte what they were; they still name the older commit `636b5a5` and are stale as FINAL evidence
 for the changed tree. Regenerate all nine from a clean committed tree (`python -m labs --evidence docs/evidence` and
 `python -m labs.matrix --evidence docs/evidence`) after the implementation is committed, then run `check_docs.py --final`.
 

@@ -1,9 +1,10 @@
 # Publication record (M5)
 
 What the publication step (M0 section 9, M5) asked for, what was done, and what is still open.
-**Published to GitHub `main` on 2026-11-09.** The owner approved the push in writing. Commit `947358b` was pushed to `main` as a
+**Published to GitHub `main` on 2026-11-09.** The owner approved the push in writing. Commit `947358b` (now `bf9e215`; section 6, item 7) was pushed to `main` as a
 normal fast-forward from `fb8be8e` (33 commits, no merge, no force, no tag); the development branch name was not published.
-No release has been made. The repository has been public since 2026-11-03, and its description was set at publication
+No release has been made. Later the same day the history was rewritten to remove one commit trailer and `main` was force-pushed
+(section 6, item 7). The repository has been public since 2026-11-03, and its description was set at publication
 (section 6, item 5). Sections 1 to 4 describe the checks made before the push, as they stood on that day; section 5 is the
 register of what is settled and what is still open, with who resolves each item; section 6 says what was done for the evidence,
 the audit and the publication.
@@ -26,11 +27,11 @@ the audit and the publication.
 |---|---|
 | The link and snippet checker passes | `python tools/check_docs.py` reports no problem. It follows every relative link and anchor, compares the four snippets in the README with their source and the 16 evidence blocks of the README, the walkthrough and the finding pages with their evidence files. `--final` also requires the evidence to be marked `FINAL` and to name a commit in the history whose `src/`, `labs/`, `tests/`, `requirements.lock` and `pyproject.toml` are those of HEAD; that commit need not be HEAD, so evidence can be committed after the commit it describes (section 6) |
 | A cold reader can state the project's purpose and the findings in about 90 seconds | **Not shown.** The part of the README above its quick start (the purpose, the three questions, the diagram and the findings table) is short enough for that, and a test keeps it short, but no person who has not seen the project has read it. That is a measure of length and not of understanding |
-| Nothing is pushed or published without approval | Met. The first push (`947358b` to `main`, 2026-11-09) was made on the owner's explicit written approval; each later push needs its own |
+| Nothing is pushed or published without approval | Met. The first push (`947358b`, now `bf9e215`, to `main`, 2026-11-09), the second push and the force push of the rewritten history (section 6, items 6 and 7) were each made on the owner's explicit written approval; each later push needs its own |
 
 ## 3. The fresh-clone reproduction
 
-**macOS arm64, CPython 3.13.7: done.** A clone of the committed project (`b5982c3`) was made, the M5 working tree was laid over it
+**macOS arm64, CPython 3.13.7: done.** A clone of the committed project (`dd4c006`) was made, the M5 working tree was laid over it
 and committed in that scratch clone only (the real repository was not touched), and the documented commands were run there, in a
 new virtual environment built by the README's three commands. On 2026-11-05:
 
@@ -127,7 +128,7 @@ not claimed anywhere as done. "Resolves" is who has to act.
 |---|---|---|---|
 | **Linux reproduction** (M0 required it) | **Outstanding.** Only macOS arm64, CPython 3.13.7, was run. The lock holds macOS arm64 hashes for `cffi`, `cryptography` and `pydantic_core`, so a Linux install by hash is refused | Not cross-platform verified; the README, claims register and threat model say one tested platform. Exact steps and the lock adjustments that may be needed are in section 3 | You: approve a Linux lock (the exact artefacts) and a Linux host, a VM or an image pull |
 | **Licence (D8)** | **Settled.** The owner approved MIT for the code (`LICENSE`, `Copyright (c) 2026 outsidethecode`) and CC BY 4.0 for the documents, with `outsidethecode` as the publishing and copyright identity, and stated that they have the rights to publish and that no employer or client holds rights in the work. `outsidethecode` is a handle, not a legal name, and this record cannot verify ownership; the claims register makes no claim about it. The project name is not cleared (see Name check) | A technical provenance review on 2026-11-09 (not a legal certification, and no licence scanner was run) found no copied or vendored third-party source, no third-party asset, no employer or client material, and no copyleft dependency among the 25 locked packages (declared metadata; nothing is bundled). Section 4 has the details | Done; the owner can change the holder name later |
-| **GitHub workflow** | **Ran once and passed (2026-11-09).** The first run, on the push of `947358b`, used the `macos-26-arm64` image and CPython 3.13.17 and passed every step (section 6, item 5). A guard test also reads its text (SHA-pinned actions, read-only token, no `pull_request_target`, no event data in a script, the locked install by hash). It is one run on one runner, on a newer patch release than the 3.13.7 of the local runs; nothing is shown for a pull-request run, for Linux or for Python 3.12 | The README and C-30 say one run, on one platform; a local run is not described as a CI result | You: read the next runs; the second push will start one |
+| **GitHub workflow** | **Ran once and passed (2026-11-09).** The first run, on the push of `947358b` (now `bf9e215`), used the `macos-26-arm64` image and CPython 3.13.17 and passed every step (section 6, item 5). A guard test also reads its text (SHA-pinned actions, read-only token, no `pull_request_target`, no event data in a script, the locked install by hash). It is one run on one runner, on a newer patch release than the 3.13.7 of the local runs; nothing is shown for a pull-request run, for Linux or for Python 3.12 | The README and C-30 say one run, on one platform; a local run is not described as a CI result | You: read the next runs; the second push will start one |
 | **Private vulnerability reporting** | **Enabled on 2026-11-09 and read back as enabled through the GitHub API.** It is a repository setting. No test report has been sent, so that the channel delivers a report to the owner is not shown | SECURITY.md names it as the way to report, and no document says more than that it is switched on | You, if you want it shown: send yourself a test report |
 | **History (D9)** | **Settled (Option A).** The root commit's author address (the only commit whose author address is not the noreply address) is on a company domain, and the repository was public from 2026-11-03, before this push. The owner decided on 2026-11-09 to keep it | History was not rewritten and no force push was made; a purge of the old commit by the hosting service was not requested | Done. Rewriting later would change every commit hash and break the commit references in these documents |
 | **Human reviewer (D10)** | **D10 is still pending.** No human has read the code or the claims | The three AI reviews in [review/](review/m4-findings.md) are internal checks by the author's own model family; the README, claims register and M4 register say so | You: find a reviewer; [REVIEW-PACKAGE.md](review/REVIEW-PACKAGE.md) is written for one who has not seen the project |
@@ -162,7 +163,7 @@ M4-01, which stays a documented medium-severity limitation that is open ([m4-fin
    above were not repeated for AM-32 (the lock, the workflow and the build are unchanged). A text search of the tracked files
    for local paths, personal addresses and key markers was repeated on 2026-11-09: its one hit is a probe string in a test
    that checks the audit output contains no path.
-5. **First publication (2026-11-09).** With the owner's explicit written approval, after the checks of that day (the working tree
+5. **First publication (2026-11-09; hashes as they were then, mapped in item 7).** With the owner's explicit written approval, after the checks of that day (the working tree
    was clean at `947358b`; remote `main` was still `fb8be8e`, an ancestor of it; 33 commits, no merge, no tag), `947358b` was
    pushed to `main` as a normal fast-forward. Afterwards the remote held `main` and nothing else, and the repository description
    was set. The push started the workflow's first run (GitHub Actions, event `push`, job `tests`, 3 minutes 38 seconds): image
@@ -178,4 +179,17 @@ M4-01, which stays a documented medium-severity limitation that is open ([m4-fin
    was removed or loosened. `tests/` is part of what the evidence describes, so the nine evidence files were regenerated from
    the clean commit that holds these changes and committed after it; `check_docs.py --final` accepts them on the terms of
    step 2. `pip-audit` has not been repeated since 2026-11-05, so an advisory published after that date is not covered.
-7. **Next, all yours:** the open items of section 5, and each later push with your explicit approval.
+   These two commits (then `7a149be` and `f1b4d88`) were pushed as the second push, a normal fast-forward of `main` from
+   `947358b`, on the owner's written approval. Its Actions run passed in 3 minutes 2 seconds on the same image and Python, with
+   the same steps and results (4063, 1, 24 and 2 tests passed; `check_docs.py` 0 problems; `pip check` clean).
+7. **History rewritten (2026-11-09).** GitHub listed the Claude account as a contributor, because 35 of the 36 commits ended with a
+   `Co-Authored-By: Claude` trailer. At the owner's request the trailer was removed from the commit messages. The 35 commits
+   after the root were rewritten with identical trees, authors, committers and dates; only the message changed (the trailer
+   line, and a commit hash cited in a message was followed to the rewritten commit). The root commit `fb8be8e` is unchanged, so
+   the decision to keep its author address (section 5, D9) is unaffected. Every other hash changed: `947358b` is now `bf9e215`,
+   `7a149be` is `dbcd095`, and the old tip `f1b4d88` is `de8df9a`, where the rewrite ended. The commit hashes cited in these
+   documents were updated to the new ones in the commit after it, and the nine evidence files were regenerated from the clean
+   commit that follows. The owner approved the force push that replaced `main`. The old commits may still resolve on GitHub by
+   their hashes until the host removes them (no purge was requested), and the pages of the two earlier Actions runs name the old
+   hashes. These documents still say that the implementation was written with an AI model; only the trailer was removed.
+8. **Next, all yours:** the open items of section 5, and each later push with your explicit approval.

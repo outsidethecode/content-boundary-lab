@@ -20,7 +20,7 @@ pending, and nothing in this repository should be described as independently rev
   later edit that replaced its local paths with placeholders). Each reviewer made 61 to 71 tool calls over 24 to 26 minutes.
 - **The working tree changed while they reviewed.** I was editing documents, some tests and one docstring in `ingest.py`
   (and, later, three small fixes). Reviewers B and C each noticed and said so, and said that none of the code files they
-  analysed differed from `HEAD`. Line numbers in their reports are from `HEAD` (`a015bc5`).
+  analysed differed from `HEAD`. Line numbers in their reports are from `HEAD` (`3066341`).
 - **I ran a broad `pkill` of `pytest` processes twice** to stop my own scratch runs. It could have killed a command one of
   them was running. None of the three reports mentions an interruption.
 - I re-ran or re-derived the findings I acted on myself (marked "checked" below). The rest are reported as the reviewer
